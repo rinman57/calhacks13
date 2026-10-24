@@ -168,6 +168,7 @@ def _public_result(result: ExtractionResult) -> dict:
             "video": _file_info(result.video_path),
         },
         "caption_languages": metadata.get("caption_languages"),
+        "transcript_source": metadata.get("transcript_source"),
         "transcript_preview": preview,
         "warnings": result.warnings,
     }

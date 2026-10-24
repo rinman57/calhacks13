@@ -3,11 +3,11 @@
 Given a public watch URL, this module saves:
 
 - metadata.json: title, channel, duration, and which caption tracks exist
-- transcript.json / transcript.txt: timestamped captions, when YouTube has them
-- audio.*: an audio-only file for a later speech-to-text fallback
+- transcript.json / transcript.txt: timestamped captions, or a Cartesia transcript when those captions are missing
+- audio.*: an audio-only file
 - video.*: a single playable file, when requested
 
-It does not transcribe missing audio, extract claims, or search for evidence.
+It does not extract claims or search for evidence.
 """
 
 from __future__ import annotations
@@ -122,15 +122,6 @@ def extract_youtube(
     result.metadata_path = output_dir / "metadata.json"
     _write_json(result.metadata_path, metadata)
 
-    if transcript_payload is not None:
-        result.transcript_path = output_dir / "transcript.json"
-        result.transcript_text_path = output_dir / "transcript.txt"
-        _write_json(result.transcript_path, transcript_payload)
-        result.transcript_text_path.write_text(
-            _render_transcript(transcript_payload["segments"]),
-            encoding="utf-8",
-        )
-
     progress("audio")
     try:
         result.audio_path = _download(watch_url, output_dir, "audio", AUDIO_FORMAT)
@@ -143,6 +134,41 @@ def extract_youtube(
             result.video_path = _download(watch_url, output_dir, "video", VIDEO_FORMAT)
         except DownloadError as exc:
             result.warnings.append(f"Video download failed: {_short_error(exc)}")
+
+    speech_error = None
+    if transcript_payload is None and result.audio_path is not None:
+        from extract.transcribe import TranscriptionError, transcript_from_audio
+
+        progress("speech")
+        try:
+            transcript_payload = transcript_from_audio(
+                result.audio_path,
+                video_id=video_id,
+                language=languages[0] if languages else "en",
+            )
+        except TranscriptionError as exc:
+            speech_error = str(exc)
+            result.warnings.append(speech_error)
+
+    if transcript_payload is not None:
+        result.transcript_path = output_dir / "transcript.json"
+        result.transcript_text_path = output_dir / "transcript.txt"
+        _write_json(result.transcript_path, transcript_payload)
+        result.transcript_text_path.write_text(
+            _render_transcript(transcript_payload["segments"]),
+            encoding="utf-8",
+        )
+        metadata["transcript_fetched"] = True
+        metadata["transcript_source"] = transcript_payload["source"]
+        metadata["transcript_language_code"] = transcript_payload["language_code"]
+        metadata["transcript_error"] = None
+        if transcript_payload.get("model"):
+            metadata["transcript_model"] = transcript_payload["model"]
+    elif speech_error:
+        metadata["transcript_error"] = " ".join(
+            part for part in (transcript_error, speech_error) if part
+        )
+    _write_json(result.metadata_path, metadata)
 
     progress("done")
 

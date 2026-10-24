@@ -3,7 +3,7 @@ if (!globalThis.__ytExtractLoaded) {
 
   const SERVER = "http://127.0.0.1:8765";
   const FOLLOW_KEY = "followVideos";
-  const STAGES = ["metadata", "transcript", "audio", "video"];
+  const STAGES = ["metadata", "transcript", "audio", "video", "speech"];
 
   const state = {
     videoId: null,
@@ -27,7 +27,11 @@ if (!globalThis.__ytExtractLoaded) {
   addText(panel, "h2", "Extract this video");
   const idLine = addText(panel, "p", "");
   idLine.className = "yt-extract-id";
-  const note = addText(panel, "p", "Downloads the full video, audio, and captions. Playback keeps going.");
+  const note = addText(
+    panel,
+    "p",
+    "Downloads the full video and audio. Captions are saved when YouTube allows them; otherwise the audio is transcribed.",
+  );
   note.className = "yt-extract-note";
   const button = document.createElement("button");
   button.className = "yt-extract-go";
@@ -56,6 +60,7 @@ if (!globalThis.__ytExtractLoaded) {
     ["transcript", "Captions"],
     ["audio", "Audio"],
     ["video", "Video"],
+    ["speech", "Speech-to-text"],
   ]) {
     const item = document.createElement("li");
     addText(item, "span", label);
@@ -257,7 +262,9 @@ if (!globalThis.__ytExtractLoaded) {
   function fillFinalRows(result) {
     const files = result.files || {};
     setRow("metadata", files.metadata ? "Saved" : "Missing");
-    setRow("transcript", files.transcript ? `${files.transcript.bytes} bytes` : "Not saved");
+    const fromSpeech = result.transcript_source === "cartesia";
+    setRow("transcript", !fromSpeech && files.transcript ? "Saved" : "Not saved");
+    setRow("speech", fromSpeech ? "Saved" : files.transcript ? "Not needed" : "Not saved");
     setRow("audio", files.audio ? formatBytes(files.audio.bytes) : "Missing");
     setRow("video", files.video ? formatBytes(files.video.bytes) : "Missing");
   }
@@ -338,6 +345,7 @@ if (!globalThis.__ytExtractLoaded) {
     if (stage === "transcript") return "Fetching captions";
     if (stage === "audio") return "Saving audio";
     if (stage === "video") return "Saving video";
+    if (stage === "speech") return "Transcribing the audio";
     return "Starting extraction";
   }
 
