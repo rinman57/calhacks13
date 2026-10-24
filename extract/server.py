@@ -166,12 +166,56 @@ def _public_result(result: ExtractionResult) -> dict:
             "transcript": _file_info(result.transcript_path),
             "audio": _file_info(result.audio_path),
             "video": _file_info(result.video_path),
+            "claims": _file_info(result.claims_path),
         },
         "caption_languages": metadata.get("caption_languages"),
         "transcript_source": metadata.get("transcript_source"),
         "transcript_preview": preview,
+        "claim_preview": _claim_preview(result.claims_path),
+        "checkable_count": _checkable_count(result.claims_path),
         "warnings": result.warnings,
     }
+
+
+def _claim_preview(path: Path | None) -> list[str]:
+    payload = _read_claims(path)
+    lines = []
+    for item in payload.get("statements") or []:
+        if not isinstance(item, dict) or not item.get("worth_checking"):
+            continue
+        label = item.get("preliminary_label") or "unverified"
+        confidence = item.get("label_confidence")
+        score = "" if confidence is None else f" {confidence}"
+        lines.append(f"[{_clock(item.get('start_seconds'))}] {label}{score} {item.get('text') or ''}".strip())
+    if lines:
+        return lines[:8]
+    summary = str(payload.get("summary") or "").strip()
+    return [summary] if summary else []
+
+
+def _checkable_count(path: Path | None) -> int:
+    payload = _read_claims(path)
+    count = payload.get("checkable_count")
+    if isinstance(count, int):
+        return count
+    return 0
+
+
+def _read_claims(path: Path | None) -> dict:
+    if path is None or not path.is_file():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _clock(seconds: object) -> str:
+    try:
+        total_ms = int(round(float(seconds) * 1000))
+    except (TypeError, ValueError):
+        total_ms = 0
+    minutes, remainder = divmod(max(0, total_ms), 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
 def _file_info(path: Path | None) -> dict | None:

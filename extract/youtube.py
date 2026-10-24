@@ -6,8 +6,9 @@ Given a public watch URL, this module saves:
 - transcript.json / transcript.txt: timestamped captions, or a Cartesia transcript when those captions are missing
 - audio.*: an audio-only file
 - video.*: a single playable file, when requested
+- claims.json: a first-pass list of claims and opinions, once the video and transcript exist
 
-It does not extract claims or search for evidence.
+It does not search for evidence. That check is left for a later agent.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ class ExtractionResult:
     transcript_text_path: Path | None = None
     audio_path: Path | None = None
     video_path: Path | None = None
+    claims_path: Path | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -170,6 +172,19 @@ def extract_youtube(
         )
     _write_json(result.metadata_path, metadata)
 
+    if result.video_path is not None and result.transcript_path is not None:
+        from extract.claims import ClaimError, extract_claims
+
+        progress("claims")
+        try:
+            result.claims_path = extract_claims(output_dir)
+        except (ClaimError, OSError, json.JSONDecodeError) as exc:
+            result.warnings.append(f"Claim check failed: {exc}")
+    elif result.transcript_path is None:
+        result.warnings.append("Claim check skipped because there is no transcript.")
+    elif result.video_path is None:
+        result.warnings.append("Claim check skipped because the video file was not saved.")
+
     progress("done")
 
     _write_json(
@@ -182,6 +197,7 @@ def extract_youtube(
             "transcript_text": _relative(result.transcript_text_path, output_dir),
             "audio": _relative(result.audio_path, output_dir),
             "video": _relative(result.video_path, output_dir),
+            "claims": _relative(result.claims_path, output_dir),
             "warnings": result.warnings,
         },
     )

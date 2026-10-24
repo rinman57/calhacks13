@@ -11,7 +11,7 @@ from extract.youtube import extract_youtube
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Save metadata, timestamped captions, audio, and video from one YouTube URL."
+        description="Save one YouTube video, its transcript, and a first-pass claim list."
     )
     parser.add_argument("url", help="YouTube watch URL, short URL, or 11-character video id")
     parser.add_argument(
@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"metadata: {result.metadata_path}")
     print(f"transcript: {result.transcript_path or 'not available'}")
     print(f"audio: {result.audio_path or 'not downloaded'}")
+    print(f"claims: {result.claims_path or 'not created'}")
     if result.video_path is not None:
         print(f"video: {result.video_path}")
     elif args.no_video:

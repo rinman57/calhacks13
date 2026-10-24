@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Extract this video",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Save the YouTube video you are watching: metadata, audio, video, and captions.",
   "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [

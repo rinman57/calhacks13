@@ -3,7 +3,7 @@ if (!globalThis.__ytExtractLoaded) {
 
   const SERVER = "http://127.0.0.1:8765";
   const FOLLOW_KEY = "followVideos";
-  const STAGES = ["metadata", "transcript", "audio", "video", "speech"];
+  const STAGES = ["metadata", "transcript", "audio", "video", "speech", "claims"];
 
   const state = {
     videoId: null,
@@ -30,7 +30,7 @@ if (!globalThis.__ytExtractLoaded) {
   const note = addText(
     panel,
     "p",
-    "Downloads the full video and audio. Captions are saved when YouTube allows them; otherwise the audio is transcribed.",
+    "Saves each video you play, then flags claims from the frames and the transcript.",
   );
   note.className = "yt-extract-note";
   const button = document.createElement("button");
@@ -44,7 +44,7 @@ if (!globalThis.__ytExtractLoaded) {
   const followBox = document.createElement("input");
   followBox.type = "checkbox";
   followLabel.appendChild(followBox);
-  addText(followLabel, "span", "Also extract the next videos in this tab");
+  addText(followLabel, "span", "Run this on each video played in this tab");
   panel.appendChild(followLabel);
   const offline = addText(panel, "p", "");
   offline.className = "yt-extract-offline";
@@ -61,6 +61,7 @@ if (!globalThis.__ytExtractLoaded) {
     ["audio", "Audio"],
     ["video", "Video"],
     ["speech", "Speech-to-text"],
+    ["claims", "Claims"],
   ]) {
     const item = document.createElement("li");
     addText(item, "span", label);
@@ -246,7 +247,9 @@ if (!globalThis.__ytExtractLoaded) {
     const captionNote = captionMessage(result);
     warning.hidden = !captionNote && !(result.warnings || []).length;
     warning.textContent = captionNote || (result.warnings || [])[0] || "";
-    const lines = result.transcript_preview || [];
+    const lines = (result.claim_preview || []).length
+      ? result.claim_preview
+      : result.transcript_preview || [];
     preview.hidden = lines.length === 0;
     preview.textContent = lines.join("\n");
   }
@@ -267,6 +270,10 @@ if (!globalThis.__ytExtractLoaded) {
     setRow("speech", fromSpeech ? "Saved" : files.transcript ? "Not needed" : "Not saved");
     setRow("audio", files.audio ? formatBytes(files.audio.bytes) : "Missing");
     setRow("video", files.video ? formatBytes(files.video.bytes) : "Missing");
+    setRow(
+      "claims",
+      files.claims ? `${result.checkable_count || 0} to research` : "Not saved",
+    );
   }
 
   function setRow(stage, text) {
@@ -346,6 +353,7 @@ if (!globalThis.__ytExtractLoaded) {
     if (stage === "audio") return "Saving audio";
     if (stage === "video") return "Saving video";
     if (stage === "speech") return "Transcribing the audio";
+    if (stage === "claims") return "Flagging claims";
     return "Starting extraction";
   }
 
@@ -382,7 +390,7 @@ if (!globalThis.__ytExtractLoaded) {
   function restoreFollow() {
     if (!inExtension()) return Promise.resolve();
     return chrome.storage.local.get(FOLLOW_KEY).then((stored) => {
-      state.follow = Boolean(stored[FOLLOW_KEY]);
+      state.follow = stored[FOLLOW_KEY] !== false;
     });
   }
 
