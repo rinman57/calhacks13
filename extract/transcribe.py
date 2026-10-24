@@ -106,13 +106,27 @@ def transcript_from_audio(audio_path: Path, *, video_id: str, language: str = "e
 def save_transcript(output_dir: Path, *, language: str = "en") -> Path:
     """Transcribe audio.* in a saved video folder and write the transcript files."""
     audio_path = _audio_file(output_dir)
-    payload = transcript_from_audio(audio_path, video_id=output_dir.name, language=language)
+    payload = transcript_from_audio(audio_path, video_id=_saved_video_id(output_dir), language=language)
     transcript_path = output_dir / "transcript.json"
     text_path = output_dir / "transcript.txt"
     _write_json(transcript_path, payload)
     text_path.write_text(_render_transcript(payload["segments"]), encoding="utf-8")
     _patch_saved_metadata(output_dir, payload)
     return transcript_path
+
+
+def _saved_video_id(output_dir: Path) -> str:
+    metadata_path = output_dir / "metadata.json"
+    if metadata_path.is_file():
+        try:
+            video_id = str(json.loads(metadata_path.read_text(encoding="utf-8")).get("video_id") or "")
+        except json.JSONDecodeError:
+            video_id = ""
+        if video_id:
+            return video_id
+    from extract.youtube import video_id_from_folder
+
+    return video_id_from_folder(output_dir.name)
 
 
 def _audio_file(output_dir: Path) -> Path:

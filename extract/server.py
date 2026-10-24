@@ -167,12 +167,16 @@ def _public_result(result: ExtractionResult) -> dict:
             "audio": _file_info(result.audio_path),
             "video": _file_info(result.video_path),
             "claims": _file_info(result.claims_path),
+            "evidence": _file_info(result.evidence_path),
+            "verdict": _file_info(result.verdict_path),
         },
         "caption_languages": metadata.get("caption_languages"),
         "transcript_source": metadata.get("transcript_source"),
         "transcript_preview": preview,
         "claim_preview": _claim_preview(result.claims_path),
         "checkable_count": _checkable_count(result.claims_path),
+        "verdicts": _verdict_cards(result.claims_path, result.evidence_path, result.verdict_path),
+        "assessed_count": _assessed_count(result.verdict_path),
         "warnings": result.warnings,
     }
 
@@ -191,6 +195,95 @@ def _claim_preview(path: Path | None) -> list[str]:
         return lines[:8]
     summary = str(payload.get("summary") or "").strip()
     return [summary] if summary else []
+
+
+def _verdict_cards(
+    claims_path: Path | None,
+    evidence_path: Path | None,
+    verdict_path: Path | None,
+) -> list[dict]:
+    statements = {
+        item.get("id"): item
+        for item in (_read_claims(claims_path).get("statements") or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    evidence = {
+        item.get("claim_id"): item
+        for item in (_read_json_list(evidence_path, "claims"))
+        if isinstance(item, dict)
+    }
+    cards = []
+    for row in _read_json_list(verdict_path, "results"):
+        if not isinstance(row, dict):
+            continue
+        statement = statements.get(row.get("claim_id")) or {}
+        cards.append(
+            {
+                "claim_id": row.get("claim_id"),
+                "start_seconds": statement.get("start_seconds"),
+                "text": statement.get("text") or "",
+                "verdict": row.get("verdict"),
+                "headline": row.get("headline") or "",
+                "explanation": row.get("explanation") or "",
+                "context": row.get("context") or "",
+                "limitations": [item for item in (row.get("limitations") or []) if isinstance(item, str)],
+                "research_status": row.get("research_status"),
+                "assessment_status": row.get("assessment_status"),
+                "error": row.get("error") or _evidence_error(evidence.get(row.get("claim_id"))),
+                "sources": _card_sources(evidence.get(row.get("claim_id")), row),
+            }
+        )
+    return cards[:8]
+
+
+def _card_sources(evidence_claim: dict | None, row: dict) -> list[dict]:
+    sources = (evidence_claim or {}).get("sources") or []
+    by_id = {item.get("source_id"): item for item in sources if isinstance(item, dict)}
+    chosen: list[dict] = []
+    seen: set[str] = set()
+
+    def add(source: dict) -> None:
+        url = source.get("url")
+        if not isinstance(url, str) or not url.startswith(("https://", "http://")) or url in seen:
+            return
+        seen.add(url)
+        title = source.get("title") if isinstance(source.get("title"), str) and source.get("title") else url
+        chosen.append({"title": title, "url": url})
+
+    for ref in row.get("evidence_refs") or []:
+        if isinstance(ref, dict) and ref.get("source_id") in by_id:
+            add(by_id[ref["source_id"]])
+    if not chosen:
+        for source in sources:
+            if isinstance(source, dict):
+                add(source)
+    return chosen[:5]
+
+
+def _evidence_error(evidence_claim: dict | None) -> str | None:
+    if not isinstance(evidence_claim, dict):
+        return None
+    error = evidence_claim.get("error")
+    return error if isinstance(error, str) and error else None
+
+
+def _assessed_count(path: Path | None) -> int:
+    return sum(
+        1
+        for row in _read_json_list(path, "results")
+        if isinstance(row, dict) and row.get("assessment_status") == "complete"
+    )
+
+
+def _read_json_list(path: Path | None, field: str) -> list:
+    if path is None or not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = payload.get(field) if isinstance(payload, dict) else None
+    return rows if isinstance(rows, list) else []
 
 
 def _checkable_count(path: Path | None) -> int:

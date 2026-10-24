@@ -3,7 +3,7 @@ if (!globalThis.__ytExtractLoaded) {
 
   const SERVER = "http://127.0.0.1:8765";
   const FOLLOW_KEY = "followVideos";
-  const STAGES = ["metadata", "transcript", "audio", "video", "speech", "claims"];
+  const STAGES = ["metadata", "transcript", "audio", "speech", "claims", "research", "assess"];
 
   const state = {
     videoId: null,
@@ -30,7 +30,7 @@ if (!globalThis.__ytExtractLoaded) {
   const note = addText(
     panel,
     "p",
-    "Saves each video you play, then flags claims from the frames and the transcript.",
+    "Saves the transcript, then checks its claims against outside sources.",
   );
   note.className = "yt-extract-note";
   const button = document.createElement("button");
@@ -59,9 +59,10 @@ if (!globalThis.__ytExtractLoaded) {
     ["metadata", "Details"],
     ["transcript", "Captions"],
     ["audio", "Audio"],
-    ["video", "Video"],
     ["speech", "Speech-to-text"],
     ["claims", "Claims"],
+    ["research", "Research"],
+    ["assess", "Verdicts"],
   ]) {
     const item = document.createElement("li");
     addText(item, "span", label);
@@ -76,6 +77,10 @@ if (!globalThis.__ytExtractLoaded) {
   preview.className = "yt-extract-preview";
   preview.hidden = true;
   panel.appendChild(preview);
+  const verdicts = document.createElement("div");
+  verdicts.className = "yt-extract-verdicts";
+  verdicts.hidden = true;
+  panel.appendChild(verdicts);
   document.documentElement.appendChild(panel);
 
   button.addEventListener("click", () => startExtract(state.videoId));
@@ -207,6 +212,8 @@ if (!globalThis.__ytExtractLoaded) {
     rows.hidden = true;
     warning.hidden = true;
     preview.hidden = true;
+    verdicts.hidden = true;
+    verdicts.replaceChildren();
     clearRows();
   }
 
@@ -215,6 +222,7 @@ if (!globalThis.__ytExtractLoaded) {
     rows.hidden = false;
     warning.hidden = true;
     preview.hidden = true;
+    verdicts.hidden = true;
     statusLine.textContent = stageLabel(stage);
     for (const name of STAGES) {
       const index = STAGES.indexOf(name);
@@ -245,11 +253,18 @@ if (!globalThis.__ytExtractLoaded) {
     statusLine.textContent = job.status === "done" ? "Saved" : "Finished with a problem";
     fillFinalRows(result);
     const captionNote = captionMessage(result);
-    warning.hidden = !captionNote && !(result.warnings || []).length;
-    warning.textContent = captionNote || (result.warnings || [])[0] || "";
-    const lines = (result.claim_preview || []).length
-      ? result.claim_preview
-      : result.transcript_preview || [];
+    const demandNote = geminiDemandSpike(result)
+      ? "Gemini is experiencing a demand spike, so claims were not saved. Try again in a little while."
+      : "";
+    const verifyNote = verificationMessage(result);
+    warning.hidden = !captionNote && !demandNote && !verifyNote && !(result.warnings || []).length;
+    warning.textContent = verifyNote || demandNote || captionNote || (result.warnings || [])[0] || "";
+    renderVerdicts(result);
+    const lines = (result.verdicts || []).length
+      ? []
+      : (result.claim_preview || []).length
+        ? result.claim_preview
+        : result.transcript_preview || [];
     preview.hidden = lines.length === 0;
     preview.textContent = lines.join("\n");
   }
@@ -260,6 +275,8 @@ if (!globalThis.__ytExtractLoaded) {
     statusLine.textContent = "Could not extract";
     warning.hidden = false;
     warning.textContent = message;
+    verdicts.hidden = true;
+    verdicts.replaceChildren();
   }
 
   function fillFinalRows(result) {
@@ -268,12 +285,120 @@ if (!globalThis.__ytExtractLoaded) {
     const fromSpeech = result.transcript_source === "cartesia";
     setRow("transcript", !fromSpeech && files.transcript ? "Saved" : "Not saved");
     setRow("speech", fromSpeech ? "Saved" : files.transcript ? "Not needed" : "Not saved");
-    setRow("audio", files.audio ? formatBytes(files.audio.bytes) : "Missing");
-    setRow("video", files.video ? formatBytes(files.video.bytes) : "Missing");
     setRow(
-      "claims",
-      files.claims ? `${result.checkable_count || 0} to research` : "Not saved",
+      "audio",
+      files.audio ? formatBytes(files.audio.bytes) : files.transcript && !fromSpeech ? "Not needed" : "Missing",
     );
+    setRow("claims", claimStatus(result));
+    setRow("research", result.files?.evidence ? "Saved" : "Not saved");
+    setRow(
+      "assess",
+      result.files?.verdict ? `${result.assessed_count || 0} assessed` : "Not saved",
+    );
+  }
+
+  function claimStatus(result) {
+    if (result.files?.claims) return `${result.checkable_count || 0} to research`;
+    if (geminiDemandSpike(result)) return "Gemini demand spike";
+    return "Not saved";
+  }
+
+  function geminiDemandSpike(result) {
+    return /high demand|spikes in demand/i.test((result.warnings || []).join(" "));
+  }
+
+  function verificationMessage(result) {
+    return (result.warnings || []).find((item) => /^Research|^Assessment/.test(item)) || "";
+  }
+
+  function renderVerdicts(result) {
+    verdicts.replaceChildren();
+    const cards = result.verdicts || [];
+    verdicts.hidden = cards.length === 0;
+    for (const card of cards) {
+      const article = document.createElement("article");
+      article.className = "yt-extract-verdict";
+      const heading = document.createElement("p");
+      heading.className = "yt-extract-verdict-title";
+      const seek = document.createElement("button");
+      seek.type = "button";
+      seek.textContent = clock(card.start_seconds);
+      seek.addEventListener("click", () => seekTo(card.start_seconds));
+      heading.appendChild(seek);
+      heading.appendChild(document.createTextNode(` ${card.verdict || card.assessment_status || "Not assessed"}`));
+      article.appendChild(heading);
+      addParagraph(article, card.text);
+      addParagraph(article, capWords(card.context, 30));
+      if ((card.limitations || []).length) {
+        const list = document.createElement("ul");
+        for (const limitation of card.limitations) {
+          const item = document.createElement("li");
+          item.textContent = limitation;
+          list.appendChild(item);
+        }
+        article.appendChild(list);
+      }
+      const links = document.createElement("ul");
+      for (const source of card.sources || []) {
+        const href = safeHttpUrl(source.url);
+        if (!href) continue;
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = source.title || href;
+        item.appendChild(link);
+        links.appendChild(item);
+      }
+      if (links.childNodes.length) article.appendChild(links);
+      if (card.error) addParagraph(article, card.error);
+      verdicts.appendChild(article);
+    }
+  }
+
+  function addParagraph(parent, text) {
+    if (!text) return;
+    const node = document.createElement("p");
+    node.textContent = text;
+    parent.appendChild(node);
+  }
+
+  function seekTo(seconds) {
+    const video = document.querySelector("video");
+    const time = Number(seconds);
+    if (!video || !Number.isFinite(time)) return;
+    video.currentTime = time;
+    video.play().catch(() => {});
+  }
+
+  function capWords(text, limit) {
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+    if (words.length <= limit) return words.join(" ");
+    const clipped = words.slice(0, limit);
+    const joined = clipped.join(" ");
+    const end = Math.max(joined.lastIndexOf("."), joined.lastIndexOf("!"), joined.lastIndexOf("?"));
+    if (end >= 0 && joined.slice(0, end + 1).trim().split(/\s+/).length >= 8) {
+      return joined.slice(0, end + 1);
+    }
+    return `${joined}…`;
+  }
+
+  function clock(seconds) {
+    const total = Number.isFinite(Number(seconds)) ? Math.max(0, Math.round(Number(seconds))) : 0;
+    const minutes = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function safeHttpUrl(value) {
+    try {
+      const url = new URL(value);
+      if (url.protocol === "https:" || url.protocol === "http:") return url.href;
+    } catch {
+      return "";
+    }
+    return "";
   }
 
   function setRow(stage, text) {
@@ -351,9 +476,10 @@ if (!globalThis.__ytExtractLoaded) {
     if (stage === "metadata") return "Reading the video details";
     if (stage === "transcript") return "Fetching captions";
     if (stage === "audio") return "Saving audio";
-    if (stage === "video") return "Saving video";
     if (stage === "speech") return "Transcribing the audio";
     if (stage === "claims") return "Flagging claims";
+    if (stage === "research") return "Researching claims";
+    if (stage === "assess") return "Assessing evidence";
     return "Starting extraction";
   }
 

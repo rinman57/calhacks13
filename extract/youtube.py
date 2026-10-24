@@ -1,14 +1,13 @@
-"""Download the information a later checker would read from one YouTube video.
+"""Save the transcript a later checker reads for one YouTube video.
 
 Given a public watch URL, this module saves:
 
 - metadata.json: title, channel, duration, and which caption tracks exist
-- transcript.json / transcript.txt: timestamped captions, or a Cartesia transcript when those captions are missing
-- audio.*: an audio-only file
-- video.*: a single playable file, when requested
-- claims.json: a first-pass list of claims and opinions, once the video and transcript exist
+- transcript.json / transcript.txt: timestamped captions, or a Cartesia transcript of the audio when those captions are missing
+- audio.*: the audio file, only when captions are missing and speech-to-text is needed
+- claims.json: a first-pass list of claims and opinions from that transcript
 
-It does not search for evidence. That check is left for a later agent.
+It does not download the picture and it does not search for evidence.
 """
 
 from __future__ import annotations
@@ -18,27 +17,23 @@ import re
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 from yt_dlp.utils import DownloadError
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+PACIFIC = ZoneInfo("America/Los_Angeles")
 TIMESTAMP_RE = re.compile(
     r"(?P<start>(?:\d{2}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+(?P<end>(?:\d{2}:)?\d{2}:\d{2}\.\d{3})"
 )
 
-# Audio is saved on its own so a later speech step does not have to demux the video.
+# Audio is saved only when captions are missing, so Cartesia can transcribe it.
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio/best"
-# Prefer one file that already contains picture and sound. That works without ffmpeg.
-# Separate high-resolution streams only appear once ffmpeg is installed to merge them.
-VIDEO_FORMAT = (
-    "best[ext=mp4][acodec!=none][vcodec!=none][height<=720]/"
-    "best[acodec!=none][vcodec!=none][height<=720]/"
-    "best"
-)
 
 
 @dataclass
@@ -51,6 +46,8 @@ class ExtractionResult:
     audio_path: Path | None = None
     video_path: Path | None = None
     claims_path: Path | None = None
+    evidence_path: Path | None = None
+    verdict_path: Path | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -59,6 +56,30 @@ class ExtractionResult:
             path is not None
             for path in (self.transcript_path, self.audio_path, self.video_path)
         )
+
+
+def video_id_from_folder(name: str) -> str:
+    """Return the video id from a folder named either `<id>` or `<id>_<Pacific timestamp>`."""
+    if VIDEO_ID_RE.fullmatch(name):
+        return name
+    prefix = name[:11]
+    if len(name) > 11 and name[11] == "_" and VIDEO_ID_RE.fullmatch(prefix):
+        return prefix
+    return name
+
+
+def _new_output_dir(output_root: Path, video_id: str) -> Path:
+    """Create data/<video_id>_<YYYY-MM-DD>_<HH-MM-SS>_<PDT or PST>."""
+    moment = datetime.now(PACIFIC)
+    stamp = moment.strftime("%Y-%m-%d_%H-%M-%S")
+    zone = moment.tzname() or "PST"
+    folder = output_root / f"{video_id}_{stamp}_{zone}"
+    suffix = 2
+    while folder.exists():
+        folder = output_root / f"{video_id}_{stamp}_{zone}_{suffix}"
+        suffix += 1
+    folder.mkdir(parents=True)
+    return folder
 
 
 def parse_video_id(value: str) -> str:
@@ -89,15 +110,13 @@ def extract_youtube(
     output_root: Path,
     *,
     languages: list[str] | None = None,
-    download_video: bool = True,
     on_progress: Callable[[str], None] | None = None,
 ) -> ExtractionResult:
-    """Save metadata, any available transcript, and audio for one video."""
-    languages = languages or ["en"]
+    """Save metadata and a timestamped transcript for one video."""
+    requested = languages or ["en"]
     video_id = parse_video_id(url_or_id)
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
-    output_dir = output_root / video_id
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _new_output_dir(output_root, video_id)
     result = ExtractionResult(video_id=video_id, output_dir=output_dir)
 
     def progress(stage: str) -> None:
@@ -106,15 +125,13 @@ def extract_youtube(
 
     if shutil.which("node") is None:
         result.warnings.append(
-            "node was not found. YouTube may hide the single-file video format until a JS runtime is installed."
-        )
-    if shutil.which("ffmpeg") is None:
-        result.warnings.append(
-            "ffmpeg was not found. Video is limited to a single combined file, usually 360p."
+            "node was not found. YouTube may refuse the caption or audio download until a JS runtime is installed."
         )
 
     progress("metadata")
     info = _fetch_metadata(watch_url)
+    listed = sorted(set((info.get("subtitles") or {}) | (info.get("automatic_captions") or {})))
+    languages = _expand_languages(requested, listed)
     progress("transcript")
     transcript_payload, transcript_error = _fetch_transcript(video_id, languages, output_dir, watch_url)
     if transcript_error:
@@ -124,20 +141,14 @@ def extract_youtube(
     result.metadata_path = output_dir / "metadata.json"
     _write_json(result.metadata_path, metadata)
 
-    progress("audio")
-    try:
-        result.audio_path = _download(watch_url, output_dir, "audio", AUDIO_FORMAT)
-    except DownloadError as exc:
-        result.warnings.append(f"Audio download failed: {_short_error(exc)}")
-
-    if download_video:
-        progress("video")
-        try:
-            result.video_path = _download(watch_url, output_dir, "video", VIDEO_FORMAT)
-        except DownloadError as exc:
-            result.warnings.append(f"Video download failed: {_short_error(exc)}")
-
     speech_error = None
+    if transcript_payload is None:
+        progress("audio")
+        try:
+            result.audio_path = _download(watch_url, output_dir, "audio", AUDIO_FORMAT)
+        except DownloadError as exc:
+            result.warnings.append(f"Audio download failed: {_short_error(exc)}")
+
     if transcript_payload is None and result.audio_path is not None:
         from extract.transcribe import TranscriptionError, transcript_from_audio
 
@@ -146,7 +157,7 @@ def extract_youtube(
             transcript_payload = transcript_from_audio(
                 result.audio_path,
                 video_id=video_id,
-                language=languages[0] if languages else "en",
+                language=requested[0],
             )
         except TranscriptionError as exc:
             speech_error = str(exc)
@@ -172,7 +183,7 @@ def extract_youtube(
         )
     _write_json(result.metadata_path, metadata)
 
-    if result.video_path is not None and result.transcript_path is not None:
+    if result.transcript_path is not None:
         from extract.claims import ClaimError, extract_claims
 
         progress("claims")
@@ -180,10 +191,22 @@ def extract_youtube(
             result.claims_path = extract_claims(output_dir)
         except (ClaimError, OSError, json.JSONDecodeError) as exc:
             result.warnings.append(f"Claim check failed: {exc}")
-    elif result.transcript_path is None:
+    else:
         result.warnings.append("Claim check skipped because there is no transcript.")
-    elif result.video_path is None:
-        result.warnings.append("Claim check skipped because the video file was not saved.")
+
+    if result.claims_path is not None:
+        from extract.verify import VerifyConfigError, verify_folder
+
+        progress("research")
+        try:
+            verified = verify_folder(output_dir, on_progress=progress)
+            result.evidence_path = verified.evidence_path
+            result.verdict_path = verified.verdict_path
+            result.warnings.extend(verified.warnings)
+        except VerifyConfigError as exc:
+            result.warnings.append(f"Research skipped: {exc}")
+        except Exception as exc:
+            result.warnings.append(f"Research failed: {_short_error(exc)}")
 
     progress("done")
 
@@ -198,6 +221,8 @@ def extract_youtube(
             "audio": _relative(result.audio_path, output_dir),
             "video": _relative(result.video_path, output_dir),
             "claims": _relative(result.claims_path, output_dir),
+            "evidence": _relative(result.evidence_path, output_dir),
+            "verdict": _relative(result.verdict_path, output_dir),
             "warnings": result.warnings,
         },
     )
@@ -273,6 +298,26 @@ def _metadata_payload(
         else transcript_payload["language_code"],
         "transcript_error": transcript_error,
     }
+
+
+def _expand_languages(languages: list[str], available: list[str]) -> list[str]:
+    """Keep the requested order, and include a regional track such as en-US for en."""
+    ordered: list[str] = []
+    pool = [code for code in available if isinstance(code, str) and code]
+    for requested in languages:
+        wanted = requested.lower()
+        matches = [code for code in pool if code.lower() == wanted or code.lower().startswith(wanted + "-")]
+        matches.sort(key=lambda code: (code.lower() != wanted, code.lower()))
+        for code in matches:
+            if code not in ordered:
+                ordered.append(code)
+        if not matches and requested not in ordered:
+            ordered.append(requested)
+            if "-" not in requested:
+                for region in (f"{requested}-US", f"{requested}-GB"):
+                    if region not in ordered:
+                        ordered.append(region)
+    return ordered or list(languages)
 
 
 def _fetch_transcript(

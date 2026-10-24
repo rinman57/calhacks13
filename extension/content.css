@@ -90,6 +90,7 @@
 #yt-extract-panel li span:last-child {
   color: #aaaaaa;
   text-align: right;
+  max-width: 58%;
 }
 
 #yt-extract-panel .yt-extract-preview {
@@ -98,6 +99,47 @@
   overflow: auto;
   white-space: pre-wrap;
   color: #dddddd;
+}
+
+#yt-extract-panel .yt-extract-verdicts {
+  max-height: 240px;
+  margin: 8px 0 0;
+  overflow: auto;
+}
+
+#yt-extract-panel .yt-extract-verdict {
+  margin: 0 0 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+#yt-extract-panel .yt-extract-verdict p {
+  margin: 4px 0 0;
+}
+
+#yt-extract-panel .yt-extract-verdict-title {
+  margin-top: 0;
+  font-weight: 600;
+}
+
+#yt-extract-panel .yt-extract-verdict button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8ab4f8;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#yt-extract-panel .yt-extract-verdict ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+#yt-extract-panel .yt-extract-verdict a {
+  color: #8ab4f8;
+  word-break: break-all;
 }
 
 #yt-extract-panel .yt-extract-warning {

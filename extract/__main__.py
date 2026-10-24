@@ -25,11 +25,6 @@ def main(argv: list[str] | None = None) -> int:
         default="en",
         help="Comma-separated caption language codes, highest priority first (default: en)",
     )
-    parser.add_argument(
-        "--no-video",
-        action="store_true",
-        help="Skip the video file. Audio, metadata, and captions are still saved.",
-    )
     args = parser.parse_args(argv)
     languages = [code.strip() for code in args.languages.split(",") if code.strip()]
 
@@ -38,7 +33,6 @@ def main(argv: list[str] | None = None) -> int:
             args.url,
             args.out,
             languages=languages,
-            download_video=not args.no_video,
         )
     except Exception as exc:
         print(f"Extraction failed: {exc}", file=sys.stderr)
@@ -50,12 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"transcript: {result.transcript_path or 'not available'}")
     print(f"audio: {result.audio_path or 'not downloaded'}")
     print(f"claims: {result.claims_path or 'not created'}")
-    if result.video_path is not None:
-        print(f"video: {result.video_path}")
-    elif args.no_video:
-        print("video: not requested")
-    else:
-        print("video: not downloaded")
+    print(f"evidence: {result.evidence_path or 'not created'}")
+    print(f"verdicts: {result.verdict_path or 'not created'}")
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return 0 if result.ok else 1
