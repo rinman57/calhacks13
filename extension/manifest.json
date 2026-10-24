@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Extract this video",
+  "version": "0.1.1",
+  "description": "Save the YouTube video you are watching: metadata, audio, video, and captions.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Extract this video",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

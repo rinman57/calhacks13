@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Extract this video</title>
+    <style>
+      body {
+        margin: 0;
+        width: 260px;
+        padding: 14px;
+        background: #0f0f0f;
+        color: #f1f1f1;
+        font: 13px/1.4 Roboto, Arial, sans-serif;
+      }
+      button {
+        width: 100%;
+        margin-top: 12px;
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 18px;
+        background: #f1f1f1;
+        color: #0f0f0f;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      p {
+        margin: 8px 0 0;
+        color: #cccccc;
+      }
+      .warn {
+        color: #f2c14e;
+      }
+    </style>
+  </head>
+  <body>
+    <strong>Extract this video</strong>
+    <p id="status">Checking the local extractor.</p>
+    <button id="extract" type="button" disabled>Extract the open video</button>
+    <script src="popup.js"></script>
+  </body>
+</html>
