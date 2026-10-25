@@ -14,7 +14,7 @@ data/<video_id>_<YYYY-MM-DD>_<HH-MM-SS>_<PDT or PST>/
   transcript.json         timestamped segments, when captions or Cartesia succeed
   transcript.txt          the same segments as [mm:ss.mmm] lines
   audio.m4a               audio file, only when captions are missing
-  claims.json             exact quotes separated into claims and opinions
+  claims.json             important, relevant factual quotes selected for research
   evidence.json           sources the researcher actually retrieved
   verdict.json            the assessor's verdict for each researched claim
   extraction_report.json  which files were written, plus any warnings
@@ -22,7 +22,15 @@ data/<video_id>_<YYYY-MM-DD>_<HH-MM-SS>_<PDT or PST>/
 
 The folder timestamp is the local Pacific time when that extract started. October is daylight-saving time, so those folders are labeled `PDT`.
 
-Haiku only copies quotes and marks each one as a claim or an opinion. It does not decide whether a claim is true. Sonnet research runs for statements with `kind` `claim`.
+Haiku reads the full transcript together with the title, channel, and description. It uses surrounding dialogue, attribution, setup/punchline, and nearby rebuttals to distinguish serious factual assertions from jokes, opinions, sarcasm, satire, and personal remarks. It selects only complete, independently checkable claims whose accuracy would materially affect the viewer's understanding or decisions. Stunt inventory, scores, ordinary trivia, and unclear fragments are omitted. It does not decide truth. Python discards non-claim candidates and anything without an explicit boolean `worth_checking: true`; rejected candidates do not enter `claims.json` or research. Empty output is valid.
+
+The selection prompt uses a three-way rubric inspired by [ClaimBuster's research](https://idir.uta.edu/~naeemul/file/claimbuster-cikm15-hassan-poster.pdf): nonfactual speech, unimportant facts, and check-worthy facts. Only the last group qualifies. It explicitly rejects isolated arithmetic and arbitrary statistics used as filler, requires a concrete material consequence, and permits whole videos with no candidates. Applied calculations with real consequences remain eligible. This is a prompt adaptation, not a ClaimBuster API integration or a validated reproduction of its classifier.
+
+Python now also requires the extractor's explicit `checkworthiness: important_fact` classification, and blocks standalone multiplication filler even when the model incorrectly admits it. This narrow rule does not exclude applied calculations with units or consequences. New claim files record `selection_version: checkworthiness-3`. After changing Python code, stop and restart the server: a running process keeps imported code in memory. The startup message and `/health` endpoint report the active selection version.
+
+Both research and assessment recheck context. Research is instructed to avoid web tools for ineligible remarks; assessment must not label nonliteral speech or uncertainty as misinformation. Transcript text cannot always establish sarcasm or vocal tone, so this remains a model judgment, not a guarantee. Only completed `contradicted` or `misleading` results for eligible claims appear as public flags. Other results remain in the saved files and execution problems remain in warnings. No flags does not mean all statements have been verified.
+
+The existing three-worker limit is unchanged and selection adds no model call. Fewer selected claims should reduce research work, but a run can still exceed a minute: full-transcript extraction precedes research, and each claim requires web retrieval followed by a separate assessment. No latency improvement has been measured for this change. Old saved claim lists retain their old selection decisions; rerun extraction to apply the new policy.
 
 Transcript segments keep the caption wording and times. Nothing in this step decides whether a statement is true.
 

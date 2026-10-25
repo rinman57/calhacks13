@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from extract.youtube import ExtractionResult, extract_youtube, parse_video_id
+from extract.claims import SELECTION_VERSION
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -31,6 +32,7 @@ def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), ExtractHandler)
     print(f"Extractor listening on http://{HOST}:{PORT}")
     print(f"Saving videos to {OUTPUT_ROOT}")
+    print(f"Claim selection: {SELECTION_VERSION}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -46,7 +48,7 @@ class ExtractHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/health":
-            self._send_json({"ok": True})
+            self._send_json({"ok": True, "selection_version": SELECTION_VERSION})
             return
         if path in {"/extension/content.js", "/extension/content.css"}:
             self._send_file(ROOT / path.lstrip("/"))
@@ -217,6 +219,15 @@ def _verdict_cards(
         if not isinstance(row, dict):
             continue
         statement = statements.get(row.get("claim_id")) or {}
+        # The public list is for evidence-backed misinformation flags. Other
+        # verdicts and execution diagnostics remain in the saved artifacts.
+        if (
+            statement.get("kind") != "claim"
+            or statement.get("worth_checking") is not True
+            or row.get("assessment_status") != "complete"
+            or row.get("verdict") not in {"contradicted", "misleading"}
+        ):
+            continue
         cards.append(
             {
                 "claim_id": row.get("claim_id"),

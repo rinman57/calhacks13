@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from extract.server import _card_sources
+from extract.server import _card_sources, _verdict_cards
 from extract.verify import (
     MAX_CONTINUATIONS,
     validate_assessment,
@@ -462,6 +462,41 @@ class VerifyTests(unittest.TestCase):
             {"evidence_refs": [{"source_id": "s1"}, {"source_id": "s2"}]},
         )
         self.assertEqual(cards, [{"title": "CPI", "url": "https://example.com/cpi"}])
+
+    def test_public_flags_exclude_uncertain_nonfactual_and_unimportant_results(self):
+        statuses = [
+            ("supported", "complete", "claim", True),
+            ("insufficient_evidence", "complete", "claim", True),
+            ("not_checkable", "complete", "claim", True),
+            (None, "failed", "claim", True),
+            ("contradicted", "complete", "opinion", True),
+            ("misleading", "complete", "claim", False),
+            ("contradicted", "failed", "claim", True),
+            ("contradicted", "complete", "claim", True),
+            ("misleading", "complete", "claim", True),
+        ]
+        statements, results = [], []
+        for index, (verdict, status, kind, worth) in enumerate(statuses):
+            claim_id = f"c{index}"
+            statements.append({"id": claim_id, "kind": kind, "worth_checking": worth, "text": "Quote"})
+            results.append({"claim_id": claim_id, "verdict": verdict, "assessment_status": status})
+        results.append({"claim_id": "missing", "verdict": "contradicted", "assessment_status": "complete"})
+        self._write("claims.json", {"statements": statements})
+        self._write("verdict.json", {"results": results})
+        cards = _verdict_cards(self.folder / "claims.json", None, self.folder / "verdict.json")
+        self.assertEqual([card["claim_id"] for card in cards], ["c7", "c8"])
+
+    def test_rejected_extraction_causes_zero_research_or_assessment_calls(self):
+        from extract.claims import _normalize
+        self._write("claims.json", _normalize({"statements": [
+            {"kind": "joke", "worth_checking": True, "text": "Balloons rise with inflation."},
+            {"kind": "opinion", "worth_checking": True, "text": "This diet is the best."},
+            {"kind": "claim", "worth_checking": False, "text": "We ate ten thousand calories."},
+        ]}, "abcdefghijk", []))
+        client, _, evidence, verdicts = self._run([])
+        self.assertEqual(client.messages.calls, [])
+        self.assertEqual(evidence["claims"], [])
+        self.assertEqual(verdicts["results"], [])
 
 
 if __name__ == "__main__":

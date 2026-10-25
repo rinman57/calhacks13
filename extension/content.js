@@ -262,9 +262,7 @@ if (!globalThis.__ytExtractLoaded) {
     renderVerdicts(result);
     const lines = (result.verdicts || []).length
       ? []
-      : (result.claim_preview || []).length
-        ? result.claim_preview
-        : result.transcript_preview || [];
+      : ["No misinformation flags to show. This does not establish that every statement is true."];
     preview.hidden = lines.length === 0;
     preview.textContent = lines.join("\n");
   }

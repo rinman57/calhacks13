@@ -25,8 +25,8 @@ from extract.transcribe import load_project_env
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_MODEL = "claude-sonnet-5-5"
-RESEARCH_PROMPT_VERSION = "research-1"
-ASSESS_PROMPT_VERSION = "assess-1"
+RESEARCH_PROMPT_VERSION = "research-2-context"
+ASSESS_PROMPT_VERSION = "assess-2-context"
 MAX_SEARCHES = 5
 MAX_FETCHES = 5
 MAX_CONTINUATIONS = 4
@@ -43,6 +43,8 @@ SUBSTANTIVE = "fetched_text"
 
 RESEARCH_SYSTEM = """You are the research agent for one factual claim from a video. You choose web searches and page fetches. You do not decide the final verdict. The original transcript quote in the user message must be repeated exactly when you refer to what was said. Do not rewrite it.
 
+First read the video context and nearby dialogue. Interpret speaker attribution, jokes, opinions, sarcasm, satire, hypothetical examples, and quoted claims being rebutted before choosing any tools. If the quote is nonliteral, incidental, personal, incomplete, or not a consequential public factual assertion, do not search or fetch; end with a research_gaps entry explaining why it is not eligible. Ambiguous tone is not permission to invent a literal claim. For eligible claims, stop when the relevant assertion is adequately covered; tool limits are ceilings, not targets.
+
 Search for evidence that could support the claim and evidence that could contradict it. Prefer original studies, official statistics, primary documents, and relevant authoritative institutions. Use reporting and existing fact-checks to locate those primary sources and to add context.
 
 Fetch a page before treating its contents as substantive evidence. A search result is only a lead until it is fetched. Do not invent quotations, page numbers, dates, publishers, or sources. Note a publication date only when the page states one. Evidence published after the video is not something the speaker can have known then. Treat syndicated copies and articles that only repeat one underlying study as the same source.
@@ -54,6 +56,8 @@ Stay inside the search and fetch limits. When you stop, end with only this JSON 
 Use an empty list when the fetched pages cover the claim."""
 
 ASSESS_SYSTEM = """You are the assessment agent. Judge one claim using only the evidence in this conversation. You have no web access. Do not add facts from memory and do not invent citations. The original transcript quote in the user message must stay exact. Do not rewrite it.
+
+Recheck context before the verdict: jokes, opinions, sarcasm, satire, personal remarks, incidental trivia, and unclear or incomplete assertions must be not_checkable. Do not label a literal reading of nonliteral speech contradicted or misleading. Respect attribution and nearby corrections; a narrator quoting or debunking a false claim is not thereby asserting it. Only a serious, relevant, materially important factual assertion can receive a contradicted or misleading verdict, and only when the supplied fetched evidence establishes the specific error or material omission. Uncertainty or missing evidence is not misinformation.
 
 Verdicts:
 - supported: relevant fetched evidence supports the claim as stated, including its qualifiers, scope, and units.
@@ -257,6 +261,8 @@ def verify_folder(
     deadline = time.monotonic() + max(0.0, float(deadline_seconds))
 
     metadata = _read_json(output_dir / "metadata.json")
+    if not isinstance(metadata, dict):
+        metadata = {}
     transcript = _read_json(output_dir / "transcript.json")
     segments = transcript.get("segments") if isinstance(transcript, dict) else []
     if not isinstance(segments, list):
@@ -281,6 +287,11 @@ def verify_folder(
     def run_one(index: int, statement: dict[str, Any]) -> None:
         nonlocal assess_sent
         context = _transcript_context(segments, statement["start_seconds"], statement["end_seconds"])
+        context = (
+            f"Video title: {metadata.get('title') or 'Unknown'}\n"
+            f"Channel: {metadata.get('channel') or 'Unknown'}\n"
+            + context
+        )
         published = _published_date(metadata)
         digest = _digest(
             {
@@ -1022,6 +1033,8 @@ def _has_substantive(refs: list[dict[str, Any]], by_source: dict[Any, dict[str, 
 
 
 def _eligible(statements: Any) -> list[dict[str, Any]]:
+    from extract.claims import is_arithmetic_filler
+
     if not isinstance(statements, list):
         return []
     chosen = []
@@ -1033,6 +1046,11 @@ def _eligible(statements: Any) -> list[dict[str, Any]]:
         text = str(item.get("text") or "").strip()
         claim_id = str(item.get("id") or "").strip()
         if not text or not claim_id:
+            continue
+        # Also protect standalone verification of older saved claim lists.
+        if is_arithmetic_filler(text):
+            continue
+        if "checkworthiness" in item and item["checkworthiness"] != "important_fact":
             continue
         chosen.append(
             {

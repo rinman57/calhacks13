@@ -60,7 +60,7 @@ class QuoteTests(unittest.TestCase):
                         "text": "The president is on screen.",
                         "start_seconds": 1,
                         "end_seconds": 2,
-                        "worth_checking": True,
+                        "worth_checking": False,
                         "preliminary_label": "true",
                         "label_confidence": 0.9,
                         "why_this_label": "Visible.",
@@ -69,6 +69,7 @@ class QuoteTests(unittest.TestCase):
                     {
                         "kind": "claim",
                         "text": "Inflation was 9 percent.",
+                        "checkworthiness": "important_fact",
                         "start_seconds": 3,
                         "end_seconds": 4,
                         "worth_checking": True,
@@ -94,18 +95,90 @@ class QuoteTests(unittest.TestCase):
             segments,
         )
         by_text = {item["text"]: item for item in payload["statements"]}
-        spoken_claim = by_text["The president is on screen."]
+        self.assertNotIn("The president is on screen.", by_text)
+        spoken_claim = by_text["Inflation was 9 percent."]
         self.assertTrue(spoken_claim["worth_checking"])
         self.assertEqual(spoken_claim["preliminary_label"], "unverified")
         self.assertEqual(spoken_claim["research_question"], "")
         self.assertIsNone(spoken_claim["label_confidence"])
         self.assertTrue(by_text["Inflation was 9 percent."]["worth_checking"])
-        personal = by_text["I last watched a long talk years ago."]
-        self.assertFalse(personal["worth_checking"])
-        self.assertEqual(personal["preliminary_label"], "opinion")
-        self.assertEqual(personal["research_question"], "")
+        self.assertNotIn("I last watched a long talk years ago.", by_text)
         self.assertEqual(spoken_claim["visual_note"], "")
-        self.assertEqual(payload["checkable_count"], 2)
+        self.assertEqual(payload["checkable_count"], 1)
+
+    def test_nonliteral_and_unapproved_candidates_are_omitted(self):
+        cases = [
+            ("joke", True, "Balloons cost more because of inflation."),
+            ("sarcasm", True, "Sure, sugar cures every disease."),
+            ("opinion", True, "This is the best diet ever."),
+            ("unclear", True, "That stuff fixes everything you know."),
+            ("invented_kind", True, "A number alone does not establish seriousness."),
+            ("claim", False, "The store contains four million calories."),
+            ("claim", None, "I ate breakfast at home today."),
+            ("claim", "true", "They have been filming for twelve hours."),
+            ("claim", True, "Inflation was 9 percent."),
+        ]
+        segments, candidates = [], []
+        for index, (kind, worth, text) in enumerate(cases):
+            segment = {"text": text, "start_seconds": index * 3, "end_seconds": index * 3 + 2}
+            segments.append(segment)
+            candidate = {"kind": kind, "checkworthiness": "important_fact", **segment}
+            if worth is not None:
+                candidate["worth_checking"] = worth
+            candidates.append(candidate)
+        payload = _normalize({"summary": "Clip", "statements": candidates}, "abc", segments)
+        self.assertEqual([item["text"] for item in payload["statements"]], [cases[-1][2]])
+        self.assertEqual(payload["checkable_count"], 1)
+
+    def test_paraphrase_cannot_transfer_eligibility_to_a_personal_remark(self):
+        payload = _normalize(
+            {"statements": [{
+                "kind": "claim", "worth_checking": True,
+                "checkworthiness": "important_fact",
+                "text": "TED imposes an eighteen minute talk limit.",
+                "start_seconds": 46.287, "end_seconds": 50.06,
+            }]},
+            "abc", self.segments,
+        )
+        self.assertEqual(payload["statements"], [])
+
+    def test_empty_selection_needs_no_research(self):
+        from extract.verify import _eligible
+        payload = _normalize({"summary": "A comedy sketch.", "statements": []}, "abc", [])
+        self.assertEqual(_eligible(payload["statements"]), [])
+
+    def test_arithmetic_filler_is_blocked_even_when_model_admits_it(self):
+        from extract.verify import _eligible
+        rejected = [
+            "2x6 equals 12.", "6x2 also equals 12.",
+            "And then interestingly enough 6x2 also equals 12.",
+            "2 times 6 = 12", "2 × 6 equals 12.",
+        ]
+        applied = [
+            "Two 6 mg tablets contain 12 mg of the drug.",
+            "2x6 equals 12 milligrams, the dose recommended for children.",
+            "The government spent 12 million dollars on this project.",
+        ]
+        candidates, segments = [], []
+        for index, text in enumerate(rejected + applied):
+            segment = {"text": text, "start_seconds": index * 3, "end_seconds": index * 3 + 2}
+            segments.append(segment)
+            candidates.append({"id": f"c{index}", "kind": "claim", "worth_checking": True,
+                               "checkworthiness": "important_fact", **segment})
+        payload = _normalize({"statements": candidates}, "abc", segments)
+        self.assertEqual([item["text"] for item in payload["statements"]], applied)
+        # Older saved lists cannot bypass the arithmetic rule either.
+        self.assertEqual([item["text"] for item in _eligible(candidates)], applied)
+        self.assertEqual(payload["selection_version"], "checkworthiness-3")
+
+    def test_missing_or_unimportant_classification_is_not_admitted(self):
+        segments = [{"text": "My height in inches is 70.5.", "start_seconds": 1, "end_seconds": 2}]
+        for classification in (None, "unimportant_fact", "nonfactual"):
+            with self.subTest(classification=classification):
+                item = {"kind": "claim", "worth_checking": True, **segments[0]}
+                if classification is not None:
+                    item["checkworthiness"] = classification
+                self.assertEqual(_normalize({"statements": [item]}, "abc", segments)["statements"], [])
 
     def test_caption_file_header_is_not_speech(self):
         self.assertEqual(_spoken_text("WEBVTT #Elemental Media Engine(TM) 2.11.0.400122"), "")
