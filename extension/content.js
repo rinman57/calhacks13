@@ -11,9 +11,6 @@ if (!globalThis.__ytExtractLoaded) {
     jobId: null,
     poll: 0,
     serverOk: false,
-    sidebarOpen: false,
-    openClaimId: null,
-    lastResult: null,
   };
   const jobsByVideo = new Map();
 
@@ -24,18 +21,10 @@ if (!globalThis.__ytExtractLoaded) {
     return node;
   }
 
-  const launcher = document.createElement("button");
-  launcher.id = "yt-extract-launcher";
-  launcher.type = "button";
-  launcher.hidden = true;
-  launcher.setAttribute("aria-label", "Show claim checks");
-  launcher.textContent = "!";
-  document.documentElement.appendChild(launcher);
-
   const panel = document.createElement("aside");
   panel.id = "yt-extract-panel";
   panel.hidden = true;
-  addText(panel, "h2", "Claims");
+  addText(panel, "h2", "Extract this video");
   const idLine = addText(panel, "p", "");
   idLine.className = "yt-extract-id";
   const note = addText(
@@ -95,11 +84,6 @@ if (!globalThis.__ytExtractLoaded) {
   document.documentElement.appendChild(panel);
 
   button.addEventListener("click", () => startExtract(state.videoId));
-  launcher.addEventListener("click", () => {
-    state.sidebarOpen = !state.sidebarOpen;
-    panel.hidden = !state.sidebarOpen;
-    launcher.classList.toggle("open", state.sidebarOpen);
-  });
   followBox.addEventListener("change", () => {
     state.follow = followBox.checked;
     saveFollow(state.follow);
@@ -147,21 +131,15 @@ if (!globalThis.__ytExtractLoaded) {
 
   function refreshPage() {
     const videoId = currentVideoId();
-    launcher.hidden = videoId === null;
+    panel.hidden = videoId === null;
     if (videoId === null) {
       stopPoll();
       state.videoId = null;
       state.jobId = null;
-      state.sidebarOpen = false;
-      panel.hidden = true;
       return;
     }
     if (videoId === state.videoId) return;
     state.videoId = videoId;
-    state.sidebarOpen = false;
-    state.openClaimId = null;
-    panel.hidden = true;
-    launcher.classList.remove("open");
     idLine.textContent = pageTitle(videoId);
     const existing = jobsByVideo.get(videoId);
     if (existing) {
@@ -182,8 +160,7 @@ if (!globalThis.__ytExtractLoaded) {
     state.serverOk = true;
     state.jobId = job.job_id;
     jobsByVideo.set(videoId, job.job_id);
-    panel.hidden = !state.sidebarOpen;
-    launcher.hidden = false;
+    panel.hidden = false;
     idLine.textContent = job.result?.title || pageTitle(videoId);
     showJob(job);
     if (job.status === "running") pollJob();
@@ -194,8 +171,6 @@ if (!globalThis.__ytExtractLoaded) {
     stopPoll();
     state.jobId = null;
     setBusy(true);
-    verdicts.hidden = true;
-    verdicts.replaceChildren();
     showRunning("starting");
     requestExtract(videoId)
       .then((job) => {
@@ -244,9 +219,10 @@ if (!globalThis.__ytExtractLoaded) {
 
   function showRunning(stage) {
     statusLine.hidden = false;
-    rows.hidden = true;
+    rows.hidden = false;
     warning.hidden = true;
     preview.hidden = true;
+    verdicts.hidden = true;
     statusLine.textContent = stageLabel(stage);
     for (const name of STAGES) {
       const index = STAGES.indexOf(name);
@@ -262,16 +238,11 @@ if (!globalThis.__ytExtractLoaded) {
     if (job.status === "running") {
       setBusy(true);
       showRunning(job.stage);
-      if (job.result) {
-        if (job.result.title) idLine.textContent = job.result.title;
-        renderVerdicts(job.result);
-      }
       return;
     }
     setBusy(false);
     statusLine.hidden = false;
-    rows.hidden = true;
-    preview.hidden = true;
+    rows.hidden = false;
     if (job.status === "error" && !job.result) {
       showFailure(job.error || "Extraction failed.");
       return;
@@ -289,6 +260,13 @@ if (!globalThis.__ytExtractLoaded) {
     warning.hidden = !captionNote && !demandNote && !verifyNote && !(result.warnings || []).length;
     warning.textContent = verifyNote || demandNote || captionNote || (result.warnings || [])[0] || "";
     renderVerdicts(result);
+    const lines = (result.verdicts || []).length
+      ? []
+      : (result.claim_preview || []).length
+        ? result.claim_preview
+        : result.transcript_preview || [];
+    preview.hidden = lines.length === 0;
+    preview.textContent = lines.join("\n");
   }
 
   function showFailure(message) {
@@ -334,68 +312,23 @@ if (!globalThis.__ytExtractLoaded) {
   }
 
   function renderVerdicts(result) {
-    state.lastResult = result;
     verdicts.replaceChildren();
     const cards = result.verdicts || [];
     verdicts.hidden = cards.length === 0;
-    launcher.classList.toggle("has-results", cards.length > 0);
     for (const card of cards) {
       const article = document.createElement("article");
       article.className = "yt-extract-verdict";
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "yt-extract-row";
-      const seek = document.createElement("span");
-      seek.className = "yt-extract-time";
+      const heading = document.createElement("p");
+      heading.className = "yt-extract-verdict-title";
+      const seek = document.createElement("button");
+      seek.type = "button";
       seek.textContent = clock(card.start_seconds);
-      seek.addEventListener("click", (event) => {
-        event.stopPropagation();
-        seekTo(card.start_seconds);
-      });
-      row.appendChild(seek);
-      const label = card.verdict || (card.assessment_status === "checking" ? "Checking" : card.assessment_status || "Not assessed");
-      row.appendChild(document.createTextNode(label));
-      const open = state.openClaimId === card.claim_id;
-      row.setAttribute("aria-expanded", open ? "true" : "false");
-      row.addEventListener("click", () => {
-        state.openClaimId = open ? null : card.claim_id;
-        renderVerdicts(result);
-      });
-      article.appendChild(row);
-      if (open) article.appendChild(detailBlock(card));
-      verdicts.appendChild(article);
-    }
-  }
-
-  function detailBlock(card) {
-    const detail = document.createElement("div");
-    detail.className = "yt-extract-detail";
-    addParagraph(detail, card.text);
-    const reason = twoSentences(card.explanation || card.context);
-    addParagraph(detail, reason);
-    const links = document.createElement("ul");
-    for (const source of card.sources || []) {
-      const href = safeHttpUrl(source.url);
-      if (!href) continue;
-      const item = document.createElement("li");
-      const link = document.createElement("a");
-      link.href = href;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = source.title || href;
-      item.appendChild(link);
-      links.appendChild(item);
-    }
-    if (links.childNodes.length) detail.appendChild(links);
-    const deeper = [card.explanation, ...(card.limitations || [])].filter(Boolean).join(" ");
-    if (deeper && deeper !== reason) {
-      const more = document.createElement("button");
-      more.type = "button";
-      more.className = "yt-extract-more";
-      more.textContent = "More";
-      const extra = document.createElement("div");
-      extra.hidden = true;
-      addParagraph(extra, card.explanation);
+      seek.addEventListener("click", () => seekTo(card.start_seconds));
+      heading.appendChild(seek);
+      heading.appendChild(document.createTextNode(` ${card.verdict || card.assessment_status || "Not assessed"}`));
+      article.appendChild(heading);
+      addParagraph(article, card.text);
+      addParagraph(article, capWords(card.context, 30));
       if ((card.limitations || []).length) {
         const list = document.createElement("ul");
         for (const limitation of card.limitations) {
@@ -403,24 +336,25 @@ if (!globalThis.__ytExtractLoaded) {
           item.textContent = limitation;
           list.appendChild(item);
         }
-        extra.appendChild(list);
+        article.appendChild(list);
       }
-      more.addEventListener("click", () => {
-        extra.hidden = !extra.hidden;
-        more.textContent = extra.hidden ? "More" : "Less";
-      });
-      detail.appendChild(more);
-      detail.appendChild(extra);
+      const links = document.createElement("ul");
+      for (const source of card.sources || []) {
+        const href = safeHttpUrl(source.url);
+        if (!href) continue;
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = source.title || href;
+        item.appendChild(link);
+        links.appendChild(item);
+      }
+      if (links.childNodes.length) article.appendChild(links);
+      if (card.error) addParagraph(article, card.error);
+      verdicts.appendChild(article);
     }
-    if (card.error) addParagraph(detail, card.error);
-    return detail;
-  }
-
-  function twoSentences(text) {
-    const cleaned = String(text || "").trim();
-    const parts = cleaned.match(/[^.!?]+[.!?]+/g);
-    if (parts && parts.length) return parts.slice(0, 2).join(" ").trim();
-    return capWords(cleaned, 40);
   }
 
   function addParagraph(parent, text) {

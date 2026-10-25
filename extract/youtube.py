@@ -5,7 +5,7 @@ Given a public watch URL, this module saves:
 - metadata.json: title, channel, duration, and which caption tracks exist
 - transcript.json / transcript.txt: timestamped captions, or a Cartesia transcript of the audio when those captions are missing
 - audio.*: the audio file, only when captions are missing and speech-to-text is needed
-- claims.json: a first-pass list of claims worth exploring from that transcript
+- claims.json: a first-pass list of claims and opinions from that transcript
 
 It does not download the picture and it does not search for evidence.
 """
@@ -120,11 +120,7 @@ def extract_youtube(
     result = ExtractionResult(video_id=video_id, output_dir=output_dir)
 
     def progress(stage: str) -> None:
-        if on_progress is None:
-            return
-        try:
-            on_progress(stage, output_dir)
-        except TypeError:
+        if on_progress is not None:
             on_progress(stage)
 
     if shutil.which("node") is None:
@@ -187,45 +183,28 @@ def extract_youtube(
         )
     _write_json(result.metadata_path, metadata)
 
-    manager = None
-    if result.transcript_path is not None:
-        from extract.verify import VerifyConfigError, VerificationSession
-
-        try:
-            manager = VerificationSession.prepare(
-                output_dir,
-                on_progress=progress,
-                on_publish=lambda: progress("publish"),
-            )
-        except VerifyConfigError as exc:
-            result.warnings.append(f"Research skipped: {exc}")
-
     if result.transcript_path is not None:
         from extract.claims import ClaimError, extract_claims
 
         progress("claims")
-
-        def on_claim(statement: dict) -> None:
-            if manager is not None:
-                manager.submit(statement)
-                progress("publish")
-
         try:
-            result.claims_path = extract_claims(output_dir, on_claim=on_claim if manager is not None else None)
+            result.claims_path = extract_claims(output_dir)
         except (ClaimError, OSError, json.JSONDecodeError) as exc:
             result.warnings.append(f"Claim check failed: {exc}")
-            claims_path = output_dir / "claims.json"
-            if claims_path.is_file():
-                result.claims_path = claims_path
     else:
         result.warnings.append("Claim check skipped because there is no transcript.")
 
-    if manager is not None:
+    if result.claims_path is not None:
+        from extract.verify import VerifyConfigError, verify_folder
+
+        progress("research")
         try:
-            verified = manager.finish()
+            verified = verify_folder(output_dir, on_progress=progress)
             result.evidence_path = verified.evidence_path
             result.verdict_path = verified.verdict_path
             result.warnings.extend(verified.warnings)
+        except VerifyConfigError as exc:
+            result.warnings.append(f"Research skipped: {exc}")
         except Exception as exc:
             result.warnings.append(f"Research failed: {_short_error(exc)}")
 

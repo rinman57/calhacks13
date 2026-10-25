@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from extract.claims import _chunk_plan, _in_primary, _normalize, _prompt, _researchable_quote, quote_from_transcript
+from extract.claims import _normalize, _prompt, quote_from_transcript
 from extract.verify import cap_words, research_prompt
 from extract.youtube import _expand_languages, _parse_vtt, _spoken_text
 
@@ -58,7 +58,6 @@ class QuoteTests(unittest.TestCase):
                     {
                         "kind": "claim",
                         "text": "The president is on screen.",
-                        "research_basis": "skip",
                         "start_seconds": 1,
                         "end_seconds": 2,
                         "worth_checking": True,
@@ -70,7 +69,6 @@ class QuoteTests(unittest.TestCase):
                     {
                         "kind": "claim",
                         "text": "Inflation was 9 percent.",
-                        "research_basis": "public_affairs",
                         "start_seconds": 3,
                         "end_seconds": 4,
                         "worth_checking": True,
@@ -96,29 +94,18 @@ class QuoteTests(unittest.TestCase):
             segments,
         )
         by_text = {item["text"]: item for item in payload["statements"]}
-        self.assertNotIn("The president is on screen.", by_text)
-        spoken_claim = by_text["Inflation was 9 percent."]
+        spoken_claim = by_text["The president is on screen."]
         self.assertTrue(spoken_claim["worth_checking"])
         self.assertEqual(spoken_claim["preliminary_label"], "unverified")
         self.assertEqual(spoken_claim["research_question"], "")
         self.assertIsNone(spoken_claim["label_confidence"])
         self.assertTrue(by_text["Inflation was 9 percent."]["worth_checking"])
-        self.assertNotIn("I last watched a long talk years ago.", by_text)
+        personal = by_text["I last watched a long talk years ago."]
+        self.assertFalse(personal["worth_checking"])
+        self.assertEqual(personal["preliminary_label"], "opinion")
+        self.assertEqual(personal["research_question"], "")
         self.assertEqual(spoken_claim["visual_note"], "")
-        self.assertEqual(payload["checkable_count"], 1)
-
-    def test_later_chunk_owns_a_quote_that_starts_after_the_boundary(self):
-        segments = [
-            {"start_seconds": index * 20, "end_seconds": index * 20 + 5, "text": f"Line {index} says a fact."}
-            for index in range(10)
-        ]
-        plans = _chunk_plan(segments)
-        self.assertGreater(len(plans), 1)
-        self.assertEqual(plans[0]["primary_end"], 75.0)
-        self.assertTrue(_in_primary(60.0, plans[0], last=False))
-        self.assertFalse(_in_primary(80.0, plans[0], last=False))
-        self.assertTrue(_in_primary(80.0, plans[1], last=False))
-        self.assertTrue(plans[1]["context"])
+        self.assertEqual(payload["checkable_count"], 2)
 
     def test_caption_file_header_is_not_speech(self):
         self.assertEqual(_spoken_text("WEBVTT #Elemental Media Engine(TM) 2.11.0.400122"), "")
@@ -151,103 +138,7 @@ class QuoteTests(unittest.TestCase):
         prompt = _prompt({"title": "Talk", "channel": "Channel"}, "Hello.")
         self.assertIn("speaker's own experience", prompt)
         self.assertIn("Do not paraphrase", prompt)
-        self.assertIn("back in 2009,", prompt)
-        self.assertIn("44 seconds", prompt)
-        self.assertIn("would matter if it were false", prompt)
-        self.assertNotIn('kind "opinion"', prompt)
         self.assertNotIn("preliminary_label", prompt)
-
-    def test_prompt_judges_claims_by_the_kind_of_video(self):
-        prompt = _prompt(
-            {
-                "title": "Eat Everything In A Grocery Store, Win $1,000,000",
-                "channel": "MrBeast",
-                "description": "I trapped 4 strangers in an entire supermarket.\nhttps://example.com/store\n\nLater paragraph",
-            },
-            "Hello.",
-        )
-        self.assertIn("Channel: MrBeast", prompt)
-        self.assertIn("trapped 4 strangers", prompt)
-        self.assertNotIn("https://example.com", prompt)
-        self.assertNotIn("Later paragraph", prompt)
-        self.assertIn("premise of a stunt", prompt)
-
-    def test_joke_fragments_and_talk_timing_are_not_researched(self):
-        self.assertFalse(_researchable_quote("back in 2009,"))
-        self.assertFalse(_researchable_quote("I'm at 44 seconds right now;"))
-        self.assertTrue(_researchable_quote("Inflation was 9 percent."))
-        self.assertTrue(_researchable_quote("they say the noise causes cancer"))
-        payload = _normalize(
-            {
-                "summary": "A short comic talk.",
-                "statements": [
-                    {"kind": "claim", "research_basis": "public_affairs", "text": "back in 2009,", "start_seconds": 36.141, "end_seconds": 37.855},
-                    {
-                        "kind": "claim",
-                        "text": "I'm at 44 seconds right now;",
-                        "research_basis": "other_material_fact",
-                        "start_seconds": 57.56,
-                        "end_seconds": 59.155,
-                    },
-                    {
-                        "kind": "claim",
-                        "text": "they say the noise causes cancer",
-                        "research_basis": "health_safety",
-                        "start_seconds": 1,
-                        "end_seconds": 2,
-                    },
-                ],
-            },
-            "abc",
-            [
-                {"start_seconds": 36.141, "end_seconds": 37.855, "text": "back in 2009,"},
-                {"start_seconds": 57.56, "end_seconds": 59.155, "text": "I'm at 44 seconds right now;"},
-                {"start_seconds": 1, "end_seconds": 2, "text": "they say the noise causes cancer"},
-            ],
-        )
-        by_text = {item["text"]: item for item in payload["statements"]}
-        self.assertNotIn("back in 2009,", by_text)
-        self.assertNotIn("I'm at 44 seconds right now;", by_text)
-        self.assertTrue(by_text["they say the noise causes cancer"]["worth_checking"])
-        self.assertEqual(payload["checkable_count"], 1)
-
-    def test_unqualified_candidates_never_reach_the_research_callback(self):
-        import json
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import patch
-        from extract.claims import extract_claims
-
-        cases = [
-            ("The store has 4.3 million calories of food.", "skip"),
-            ("This could take us over a year.", "skip"),
-            ("I ate breakfast at home today.", None),
-            ("there's too much money involved with sugar the", "unknown"),
-            ("they say the noise causes cancer", "health_safety"),
-            ("Inflation was 9 percent.", "public_affairs"),
-        ]
-        segments, candidates = [], []
-        for index, (text, basis) in enumerate(cases):
-            segment = {"text": text, "start_seconds": index * 3, "end_seconds": index * 3 + 2}
-            segments.append(segment)
-            candidate = {"kind": "claim", **segment}
-            if basis is not None:
-                candidate["research_basis"] = basis
-            candidates.append(candidate)
-        submitted = []
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder)
-            (path / "metadata.json").write_text(json.dumps({"video_id": "abc"}))
-            (path / "transcript.json").write_text(json.dumps({"segments": segments}))
-            with patch("extract.claims.load_project_env"), patch.dict(
-                "os.environ", {"ANTHROPIC_API_KEY": "test-key"}
-            ), patch("extract.claims._generate", return_value={"summary": "Clip", "statements": candidates}):
-                result = extract_claims(path, on_claim=submitted.append)
-            saved = json.loads(result.read_text())
-        self.assertEqual([item["text"] for item in submitted], [text for text, _ in cases[-2:]])
-        self.assertEqual(saved["checkable_count"], 2)
-        self.assertTrue(all(item["worth_checking"] for item in submitted))
-        self.assertEqual(submitted[0]["research_basis"], "health_safety")
 
     def test_context_summary_stops_at_thirty_words(self):
         text = (
