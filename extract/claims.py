@@ -1,90 +1,48 @@
 """Preliminary claim list for one saved transcript.
 
-This is step 2 of the pipeline: read the timestamped transcript, separate
-claims from opinions, and give each statement a first-pass label with a
-confidence score. It does not search the web and it does not watch the video.
-Later research agents read claims.json and check the worth_checking items on
-their own.
+This is step 2 of the pipeline. A fast model copies checkable quotes out of the
+timestamped transcript. It keeps only claims worth exploring and leaves the rest out. It does not search the
+web, watch the video, or decide whether a quote is true. The researcher and
+assessor do that later.
 
-The model is Gemini 3.8 Flash. Structured output forces the claims.json shape.
+The model is Claude Haiku 5.5. Structured output forces the claims.json shape.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
-import urllib.error
-import urllib.request
+import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 from extract.transcribe import load_project_env
 
-MODEL = "gemini-3.8-flash"
-API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
-LABELS = ("true", "misinfo", "misleading", "unverified", "opinion", "satire")
-KINDS = ("claim", "opinion")
+MODEL = "claude-haiku-5-5"
+EFFORT = "low"
+KINDS = ("claim",)
 
-SCHEMA = {
+# The model returns only this thin object. Python fills the remaining claims.json
+# fields so a later stage can judge the quote without a second wait here.
+EXTRACT_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
-        "summary": {
-            "type": "string",
-            "description": "What the timestamped transcript is saying.",
-        },
+        "summary": {"type": "string"},
         "statements": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": list(KINDS),
-                        "description": "claim is a checkable assertion the quote itself states. opinion is a judgment, preference, joke, or the speaker's own experience.",
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "An exact contiguous quote copied from the transcript. Do not paraphrase.",
-                    },
+                    "kind": {"type": "string", "enum": list(KINDS)},
+                    "text": {"type": "string"},
                     "start_seconds": {"type": "number"},
                     "end_seconds": {"type": "number"},
-                    "visual_note": {
-                        "type": "string",
-                        "description": "Always empty. The extractor reads the transcript and does not watch frames.",
-                    },
-                    "worth_checking": {
-                        "type": "boolean",
-                        "description": "True only for an unverified, misinfo, or misleading claim a later agent should research. False for opinions, satire, personal experience, and claims the video itself settles as true.",
-                    },
-                    "preliminary_label": {
-                        "type": "string",
-                        "enum": list(LABELS),
-                        "description": "true only when the video itself settles the quote. Use unverified when outside knowledge would be required.",
-                    },
-                    "label_confidence": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "How sure this label is, from the video alone. 0 is a guess, 1 is certain.",
-                    },
-                    "why_this_label": {"type": "string"},
-                    "research_question": {
-                        "type": "string",
-                        "description": "Asks whether this exact quote is true. Empty when worth_checking is false. Do not ask about a claim the quote does not make.",
-                    },
                 },
-                "required": [
-                    "kind",
-                    "text",
-                    "start_seconds",
-                    "end_seconds",
-                    "visual_note",
-                    "worth_checking",
-                    "preliminary_label",
-                    "label_confidence",
-                    "why_this_label",
-                    "research_question",
-                ],
+                "required": ["kind", "text", "start_seconds", "end_seconds"],
             },
         },
     },
@@ -96,14 +54,21 @@ class ClaimError(RuntimeError):
     """The claim list could not be built."""
 
 
-def extract_claims(output_dir: Path) -> Path:
-    """Read one saved transcript and write claims.json."""
-    load_project_env()
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise ClaimError("GEMINI_API_KEY is not set. Add it to .env.")
+CHUNK_SECONDS = 75.0
+OVERLAP_SECONDS = 12.0
 
-    transcript = _transcript_text(output_dir)
+
+def extract_claims(output_dir: Path, on_claim: Callable[[dict], None] | None = None) -> Path:
+    """Read one saved transcript and write claims.json.
+
+    Chunks are read in order. Each accepted claim is handed to on_claim as soon
+    as it is saved, so research can start before later chunks finish.
+    """
+    load_project_env()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise ClaimError("ANTHROPIC_API_KEY is not set. Add it to .env.")
+
     metadata = _read_json(output_dir / "metadata.json")
     video_id = str(metadata.get("video_id") or "")
     if not video_id:
@@ -111,105 +76,144 @@ def extract_claims(output_dir: Path) -> Path:
 
         video_id = video_id_from_folder(output_dir.name)
 
-    raw = _generate(api_key, _prompt(metadata, transcript))
-    payload = _normalize(raw, video_id, _transcript_segments(output_dir))
+    segments = _transcript_segments(output_dir)
+    plans = _chunk_plan(segments)
+    if not plans:
+        raise ClaimError(f"No transcript in {output_dir}.")
+
+    accepted: list[dict] = []
+    summaries: list[str] = []
     path = output_dir / "claims.json"
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    for index, plan in enumerate(plans):
+        last = index == len(plans) - 1
+        try:
+            raw = _generate(api_key, _prompt(metadata, _render_rows(plan["body"]), _render_rows(plan["context"])))
+        except ClaimError:
+            if accepted:
+                _write_claims(path, video_id, summaries, accepted, complete=False)
+            raise
+        summaries.append(str(raw.get("summary") or "").strip())
+        for item in _statements_from_model(raw, plan["body"]):
+            if not _in_primary(float(item["start_seconds"]), plan, last=last):
+                continue
+            if any(_same_occurrence(item, earlier) for earlier in accepted):
+                continue
+            item["id"] = f"c{len(accepted) + 1}"
+            accepted.append(item)
+        _write_claims(path, video_id, summaries, accepted, complete=last)
+        if on_claim is not None:
+            for item in accepted:
+                if item.get("worth_checking") and not item.get("_sent"):
+                    item["_sent"] = True
+                    on_claim({key: value for key, value in item.items() if key != "_sent"})
+    for item in accepted:
+        item.pop("_sent", None)
+    _write_claims(path, video_id, summaries, accepted, complete=True)
     return path
 
 
-def _prompt(metadata: dict, transcript: str) -> str:
+def _video_blurb(metadata: dict) -> str:
+    """First paragraph of the description, without links."""
+    raw = re.sub(r"https?://\S+", "", str(metadata.get("description") or ""))
+    paragraph: list[str] = []
+    for line in raw.splitlines():
+        line = " ".join(line.split())
+        if not line:
+            if paragraph:
+                break
+            continue
+        paragraph.append(line)
+        if sum(len(part) for part in paragraph) > 420:
+            break
+    return " ".join(paragraph)[:480]
+
+
+def _prompt(metadata: dict, transcript: str, context: str = "") -> str:
     title = metadata.get("title") or "Unknown title"
     channel = metadata.get("channel") or "Unknown channel"
-    return f"""You are the claim extractor for one transcript. This is a first pass for later research agents. Do not search the web. Do not treat your own memory as a finished fact-check.
+    blurb = _video_blurb(metadata)
+    about = f"About: {blurb}\n" if blurb else ""
+    context_block = ""
+    if context.strip():
+        context_block = (
+            "CONTEXT\n"
+            "These earlier lines are only for understanding. Do not output a statement whose quote begins here.\n"
+            f"{context.strip()}\n\n"
+        )
+    return f"""You extract quotes that would matter if they were false. Work quickly. Do not search the web and do not decide whether any statement is true.
 
-You have the timestamped transcript below and no video frames. Judge only what is said. Leave visual_note empty.
+Use the channel, title, and description to judge the kind of video before you keep a line.
 
 Title: {title}
 Channel: {channel}
+{about}
+Write one sentence summarizing this part of the transcript.
 
-Write a short summary of what the transcript is saying.
+Then list only the statements worth separating. Return an empty list when nothing here would matter if it were false.
+- kind "claim" is a complete quote a viewer could take as a fact about the world outside this video. It is specific enough to check, and it would matter if it were false.
+- News, documentaries, explainers, and commentary can contain claims about health, science, money, law, products, public events, or what someone did.
+- Entertainment, challenges, comedy, pranks, gameplay, vlogs, and stunts: the story of the video is not a claim. Skip the score, the rules of the bit, how long they have been filming, what they just ate or did, who is ahead, and the prize for this challenge. "The store has 4.3 million calories" and "around 80 calories of blueberries on the floor" are the premise of a stunt, not claims.
+- Still keep a claim inside an entertainment video when the line asserts something outside the bit: what a product does, a health or safety fact, where the public's money goes, or a fact about the wider world.
+- Leave out judgments, preferences, jokes, and the speaker's own experience or memory, even when they mention a number, date, or institution. Leave out ordinary banter and the plot of the video.
+- A fragment is not a claim. A year, date, number, or place with no assertion is not a claim. "back in 2009," is not a claim.
+- The speaker timing their own talk is not a claim. "I'm at 44 seconds right now" is not a claim.
+- Skip lyrics, greetings, and lines that would not matter if they were false.
+- Copy text character for character from the transcript. Do not paraphrase, summarize, or correct it.
+- Use that quote's own start and end times.
+- Do not turn a quote into a different claim the speaker did not make.
 
-Then list the statements worth separating:
-- A claim is a checkable assertion about the world that the quote itself states.
-- An opinion is a judgment, preference, prediction, joke, or the speaker's own experience or memory. A personal remark stays an opinion even when it mentions a number, date, or institution.
-- Skip lyrics, greetings, and host banter unless they contain a checkable fact.
-- Judge the quote. Do not turn it into a different claim the speaker did not make.
-
-preliminary_label is only a first guess from this transcript. Do not use outside knowledge to choose the label or to decide what the sentence means:
-- true: the rest of the transcript settles the quote, such as a name or number the speaker repeats
-- misinfo: the transcript states something a later line in the same transcript clearly contradicts
-- misleading: the wording is not flatly false, but it leaves out or twists what the rest of the transcript says
-- unverified: a checkable claim this transcript does not settle
-- opinion: not a factual claim, including personal experience
-- satire: a sketch, joke, or lyric, not offered as a report
-
-label_confidence is how sure you are of that label, from 0 to 1. Use a low number when you are guessing. If the transcript does not settle a factual claim, use unverified instead of true or misinfo.
-
-worth_checking is true only for a claim labeled unverified, misinfo, or misleading that a later agent should research. A true label means the video already settled it, so worth_checking is false. Opinions and satire are not worth checking.
-
-research_question asks whether that exact quote is true. It must not ask about a broader claim the speaker did not make. Leave it empty when worth_checking is false.
-
-The text field must be copied character for character from the transcript below. It is the original quote later agents will pass on unchanged. Do not paraphrase, summarize, or correct it. Put interpretation in why_this_label.
-
-Use the transcript times for that exact quote. Do not invent a statement that is not in the transcript. Leave visual_note as an empty string.
-
-TRANSCRIPT
+{context_block}TRANSCRIPT
 {transcript}
 """
 
 
 def _generate(api_key: str, prompt: str) -> dict:
-    body = {
-        "model": MODEL,
-        "input": [{"type": "text", "text": prompt}],
-        "response_format": {
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": SCHEMA,
-        },
-    }
-    request = urllib.request.Request(
-        f"{API_ROOT}/interactions",
-        data=json.dumps(body).encode(),
-        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-        method="POST",
-    )
-    payload = _json(request, timeout=120)
-    text = _output_text(payload)
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key, max_retries=1, timeout=45.0)
     try:
-        parsed = json.loads(text)
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=2048,
+            system=(
+                "Return only the requested JSON. Copy transcript quotes exactly. "
+                "Skip lines that would not matter if they were false."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+            output_config={
+                "effort": EFFORT,
+                "format": {"type": "json_schema", "schema": EXTRACT_SCHEMA},
+            },
+        )
+    except Exception as exc:
+        message = str(exc).replace(api_key, "[redacted]")
+        raise ClaimError(f"Claim extraction failed ({message[:500]}).") from exc
+    texts = []
+    for block in getattr(response, "content", []) or []:
+        text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+        if isinstance(text, str) and text.strip():
+            texts.append(text)
+    if not texts:
+        raise ClaimError("Claim extraction returned no text.")
+    try:
+        parsed = json.loads("\n".join(texts))
     except json.JSONDecodeError as exc:
-        raise ClaimError("Gemini did not return JSON.") from exc
+        raise ClaimError("Claim extraction did not return JSON.") from exc
     if not isinstance(parsed, dict):
-        raise ClaimError("Gemini returned JSON that is not an object.")
+        raise ClaimError("Claim extraction returned JSON that is not an object.")
     return parsed
-
-
-def _output_text(payload: dict) -> str:
-    direct = payload.get("output_text")
-    if isinstance(direct, str) and direct.strip():
-        return direct
-    for step in reversed(payload.get("steps") or []):
-        if not isinstance(step, dict):
-            continue
-        content = step.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    return part["text"]
-        if isinstance(step.get("text"), str):
-            return step["text"]
-    output = payload.get("output")
-    if isinstance(output, list):
-        for part in output:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                return part["text"]
-    raise ClaimError("Gemini returned no text.")
 
 
 def _normalize(raw: dict, video_id: str, segments: list | None = None) -> dict:
     summary = str(raw.get("summary") or "").strip()
+    statements = _statements_from_model(raw, segments or [])
+    statements.sort(key=lambda item: (item["start_seconds"], item["end_seconds"], item["text"]))
+    for index, item in enumerate(statements, start=1):
+        item["id"] = f"c{index}"
+    return _claims_payload(video_id, summary, statements, complete=True)
+
+
+def _statements_from_model(raw: dict, segments: list) -> list[dict]:
     statements = []
     for item in raw.get("statements") or []:
         if not isinstance(item, dict):
@@ -217,53 +221,151 @@ def _normalize(raw: dict, video_id: str, segments: list | None = None) -> dict:
         proposed = str(item.get("text") or "").strip()
         if not proposed:
             continue
-        kind = item.get("kind") if item.get("kind") in KINDS else "claim"
-        label = item.get("preliminary_label")
-        if label not in LABELS:
-            label = "opinion" if kind == "opinion" else "unverified"
+        if item.get("kind") not in KINDS:
+            continue
         start = _seconds(item.get("start_seconds"))
         end = max(start, _seconds(item.get("end_seconds")))
-        text, start, end = quote_from_transcript(segments or [], start, end, proposed)
-        if not text:
+        text, start, end = quote_from_transcript(segments, start, end, proposed)
+        if not text or not _researchable_quote(text):
             continue
-        confidence = _confidence(item.get("label_confidence"))
-        worth = (
-            bool(item.get("worth_checking"))
-            and kind == "claim"
-            and label in {"unverified", "misinfo", "misleading"}
-        )
-        question = str(item.get("research_question") or "").strip() if worth else ""
         statements.append(
             {
-                "kind": kind,
+                "kind": "claim",
                 "text": text,
                 "start_seconds": start,
                 "end_seconds": end,
                 "visual_note": "",
-                "worth_checking": worth,
-                "preliminary_label": label,
-                "label_confidence": confidence,
-                "why_this_label": str(item.get("why_this_label") or "").strip(),
-                "research_question": question,
+                "worth_checking": True,
+                "preliminary_label": "unverified",
+                "label_confidence": None,
+                "why_this_label": "",
+                "research_question": "",
             }
         )
     statements.sort(key=lambda item: (item["start_seconds"], item["end_seconds"], item["text"]))
-    for index, item in enumerate(statements, start=1):
-        item["id"] = f"c{index}"
+    return statements
 
+
+def _claims_payload(video_id: str, summary: str, statements: list[dict], *, complete: bool) -> dict:
+    visible = [{key: value for key, value in item.items() if key != "_sent"} for item in statements]
     return {
         "video_id": video_id,
         "model": MODEL,
         "role": "preliminary",
         "note": (
-            "Labels are a first read of the video. They are not a finished fact-check. "
+            "The extractor only separates quotes. It does not decide whether a claim is true. "
             "Each text field is an exact transcript quote and must be copied unchanged."
         ),
         "summary": summary,
-        "statement_count": len(statements),
-        "checkable_count": sum(1 for item in statements if item["worth_checking"]),
-        "statements": statements,
+        "extraction_status": "complete" if complete else "partial",
+        "statement_count": len(visible),
+        "checkable_count": sum(1 for item in visible if item["worth_checking"]),
+        "statements": visible,
     }
+
+
+def _write_claims(path: Path, video_id: str, summaries: list[str], statements: list[dict], *, complete: bool) -> None:
+    summary = " ".join(part for part in summaries if part).strip()
+    payload = _claims_payload(video_id, summary, statements, complete=complete)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _chunk_plan(segments: list) -> list[dict]:
+    """Split timestamped lines into chronological chunks with a short overlap."""
+    rows = []
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        text = _plain_caption(str(segment.get("text") or ""))
+        if not text:
+            continue
+        try:
+            start = float(segment.get("start_seconds"))
+            end = float(segment.get("end_seconds"))
+        except (TypeError, ValueError):
+            continue
+        row = {"start_seconds": start, "end_seconds": max(start, end), "text": text}
+        if rows and rows[-1]["text"] == text and rows[-1]["start_seconds"] == row["start_seconds"]:
+            continue
+        rows.append(row)
+    if not rows:
+        return []
+    duration = max(row["end_seconds"] for row in rows)
+    if duration <= CHUNK_SECONDS:
+        return [{"primary_start": 0.0, "primary_end": duration, "context": [], "body": rows}]
+
+    plans = []
+    primary_start = 0.0
+    while primary_start < duration:
+        primary_end = min(duration, primary_start + CHUNK_SECONDS)
+        context_start = max(0.0, primary_start - OVERLAP_SECONDS)
+        look_end = min(duration, primary_end + OVERLAP_SECONDS)
+        context = [
+            row
+            for row in rows
+            if row["start_seconds"] < primary_start and row["end_seconds"] > context_start
+        ][-3:]
+        body = [row for row in rows if row["end_seconds"] > primary_start and row["start_seconds"] < look_end]
+        plans.append(
+            {
+                "primary_start": primary_start,
+                "primary_end": primary_end,
+                "context": context,
+                "body": body or context,
+            }
+        )
+        if primary_end >= duration:
+            break
+        primary_start = primary_end
+    return plans
+
+
+def _in_primary(start: float, plan: dict, *, last: bool) -> bool:
+    if last:
+        return plan["primary_start"] <= start <= plan["primary_end"]
+    return plan["primary_start"] <= start < plan["primary_end"]
+
+
+def _same_occurrence(left: dict, right: dict) -> bool:
+    if " ".join(str(left.get("text") or "").split()).lower() != " ".join(str(right.get("text") or "").split()).lower():
+        return False
+    return float(left["start_seconds"]) < float(right["end_seconds"]) and float(right["start_seconds"]) < float(
+        left["end_seconds"]
+    )
+
+
+def _render_rows(rows: list[dict]) -> str:
+    return "\n".join(f"[{_clock(float(row['start_seconds']))}] {row['text']}" for row in rows)
+
+
+def _plain_caption(text: str) -> str:
+    """Drop invisible caption marks and repeated spacing."""
+    visible = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return " ".join(visible.split())
+
+
+_TALK_ASIDE = re.compile(
+    r"\b(?:i'm|i am|we are|we're)\s+at\s+\d+\s+seconds\b"
+    r"|\b\d+\s+seconds\s+right\s+now\b"
+    r"|\b(?:doing|do)\s+(?:mine|this|it)\s+in\s+under\s+a\s+minute\b",
+    re.IGNORECASE,
+)
+
+
+def _researchable_quote(text: str) -> bool:
+    """Drop fragments, joke lead-ins, and the speaker timing their own talk.
+
+    A real short claim such as "Inflation was 9 percent." still passes.
+    """
+    stripped = " ".join(str(text or "").split())
+    if not stripped or _TALK_ASIDE.search(stripped):
+        return False
+    words = re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z]+)?", stripped)
+    if len(words) < 4:
+        return False
+    if stripped.endswith(",") and len(words) < 6:
+        return False
+    return True
 
 
 def quote_from_transcript(
@@ -389,63 +491,11 @@ def _seconds(value: object) -> float:
     return round(number, 3)
 
 
-def _confidence(value: object) -> float:
-    try:
-        number = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0.0
-    if number > 1:
-        number = number / 100
-    return round(min(1.0, max(0.0, number)), 3)
-
-
 def _clock(seconds: float) -> str:
     total_ms = int(round(seconds * 1000))
     minutes, remainder = divmod(total_ms, 60_000)
     secs, millis = divmod(remainder, 1000)
     return f"{minutes:02d}:{secs:02d}.{millis:03d}"
-
-
-def _json(request: urllib.request.Request, *, timeout: int) -> dict:
-    with _open(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise ClaimError("Gemini returned an unexpected response.")
-    return payload
-
-
-def _open(request: urllib.request.Request, *, timeout: int):
-    try:
-        return urllib.request.urlopen(request, timeout=timeout)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        message = _api_message(detail) or f"HTTP {exc.code}"
-        raise ClaimError(f"Gemini request failed ({message}).") from exc
-    except urllib.error.URLError as exc:
-        raise ClaimError(f"Gemini request failed ({exc.reason}).") from exc
-
-
-def _api_message(detail: str) -> str:
-    detail = " ".join(detail.split())
-    if not detail:
-        return ""
-    try:
-        parsed = json.loads(detail)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, dict):
-        error = parsed.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            detail = error["message"].strip()
-        else:
-            for key in ("message", "detail"):
-                value = parsed.get(key)
-                if isinstance(value, str) and value.strip():
-                    detail = value.strip()
-                    break
-    if len(detail) > 240:
-        detail = detail[:237] + "..."
-    return detail
 
 
 def main(argv: list[str] | None = None) -> int:

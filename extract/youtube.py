@@ -5,7 +5,7 @@ Given a public watch URL, this module saves:
 - metadata.json: title, channel, duration, and which caption tracks exist
 - transcript.json / transcript.txt: timestamped captions, or a Cartesia transcript of the audio when those captions are missing
 - audio.*: the audio file, only when captions are missing and speech-to-text is needed
-- claims.json: a first-pass list of claims and opinions from that transcript
+- claims.json: a first-pass list of claims worth exploring from that transcript
 
 It does not download the picture and it does not search for evidence.
 """
@@ -120,7 +120,11 @@ def extract_youtube(
     result = ExtractionResult(video_id=video_id, output_dir=output_dir)
 
     def progress(stage: str) -> None:
-        if on_progress is not None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(stage, output_dir)
+        except TypeError:
             on_progress(stage)
 
     if shutil.which("node") is None:
@@ -183,28 +187,45 @@ def extract_youtube(
         )
     _write_json(result.metadata_path, metadata)
 
+    manager = None
+    if result.transcript_path is not None:
+        from extract.verify import VerifyConfigError, VerificationSession
+
+        try:
+            manager = VerificationSession.prepare(
+                output_dir,
+                on_progress=progress,
+                on_publish=lambda: progress("publish"),
+            )
+        except VerifyConfigError as exc:
+            result.warnings.append(f"Research skipped: {exc}")
+
     if result.transcript_path is not None:
         from extract.claims import ClaimError, extract_claims
 
         progress("claims")
+
+        def on_claim(statement: dict) -> None:
+            if manager is not None:
+                manager.submit(statement)
+                progress("publish")
+
         try:
-            result.claims_path = extract_claims(output_dir)
+            result.claims_path = extract_claims(output_dir, on_claim=on_claim if manager is not None else None)
         except (ClaimError, OSError, json.JSONDecodeError) as exc:
             result.warnings.append(f"Claim check failed: {exc}")
+            claims_path = output_dir / "claims.json"
+            if claims_path.is_file():
+                result.claims_path = claims_path
     else:
         result.warnings.append("Claim check skipped because there is no transcript.")
 
-    if result.claims_path is not None:
-        from extract.verify import VerifyConfigError, verify_folder
-
-        progress("research")
+    if manager is not None:
         try:
-            verified = verify_folder(output_dir, on_progress=progress)
+            verified = manager.finish()
             result.evidence_path = verified.evidence_path
             result.verdict_path = verified.verdict_path
             result.warnings.extend(verified.warnings)
-        except VerifyConfigError as exc:
-            result.warnings.append(f"Research skipped: {exc}")
         except Exception as exc:
             result.warnings.append(f"Research failed: {_short_error(exc)}")
 
@@ -344,29 +365,47 @@ def _fetch_transcript(
 def _fetch_transcript_api(video_id: str, languages: list[str]) -> tuple[dict | None, str | None]:
     """Return a timestamped transcript, preferring a manual track over auto captions."""
     try:
-        api = YouTubeTranscriptApi()
-        listed = api.list(video_id)
-        chosen = listed.find_transcript(languages)
-        fetched = chosen.fetch()
+        listed = YouTubeTranscriptApi().list(video_id)
     except Exception as exc:
         return None, f"Transcript API failed ({_short_error(exc)})."
 
-    segments = []
-    for snippet in fetched.to_raw_data():
-        start = float(snippet["start"])
-        duration = float(snippet["duration"])
-        text = _clean_caption_text(str(snippet.get("text", "")))
-        if not text:
-            continue
-        segments.append(_segment(start, duration, text))
+    candidates = [
+        transcript
+        for transcript in listed
+        if _language_rank(transcript.language_code, languages) < len(languages)
+    ]
+    candidates.sort(
+        key=lambda transcript: (
+            transcript.is_generated,
+            _language_rank(transcript.language_code, languages),
+            transcript.language_code,
+        )
+    )
+    if not candidates:
+        return None, "Transcript API failed (NoTranscriptFound: no matching caption track)."
 
-    return _transcript_payload(
-        video_id,
-        language=fetched.language,
-        language_code=fetched.language_code,
-        source="automatic" if fetched.is_generated else "manual",
-        segments=segments,
-    ), None
+    last_error = None
+    saw_unusable = False
+    for transcript in candidates:
+        try:
+            fetched = transcript.fetch()
+        except Exception as exc:
+            last_error = f"Transcript API failed ({_short_error(exc)})."
+            continue
+        segments = _spoken_segments(fetched.to_raw_data())
+        if not segments:
+            saw_unusable = True
+            continue
+        return _transcript_payload(
+            video_id,
+            language=fetched.language,
+            language_code=fetched.language_code,
+            source="automatic" if fetched.is_generated else "manual",
+            segments=segments,
+        ), None
+    if last_error and not saw_unusable:
+        return None, last_error
+    return None, "Transcript API returned a caption track with no spoken text."
 
 
 def _fetch_transcript_captions(
@@ -478,7 +517,7 @@ def _parse_json3(raw_text: str) -> list[dict]:
     segments = []
     for event in payload.get("events") or []:
         pieces = event.get("segs") or []
-        text = _clean_caption_text("".join(str(piece.get("utf8", "")) for piece in pieces))
+        text = _spoken_text("".join(str(piece.get("utf8", "")) for piece in pieces))
         if not text:
             continue
         start = float(event.get("tStartMs") or 0) / 1000
@@ -503,7 +542,7 @@ def _parse_vtt(raw_text: str) -> list[dict]:
         while index < len(lines) and lines[index].strip():
             text_lines.append(lines[index])
             index += 1
-        text = _clean_caption_text(" ".join(text_lines))
+        text = _spoken_text(" ".join(text_lines))
         if text:
             segments.append(_segment(start, max(0.0, end - start), text))
     return segments
@@ -543,6 +582,40 @@ def _pick_caption_file(sub_dir: Path, languages: list[str]) -> Path | None:
 
     files.sort(key=rank)
     return files[0] if files else None
+
+
+def _language_rank(code: str, languages: list[str]) -> int:
+    lowered = code.lower()
+    for index, requested in enumerate(languages):
+        wanted = requested.lower()
+        if lowered == wanted or lowered.startswith(wanted + "-"):
+            return index
+    return len(languages)
+
+
+def _spoken_segments(snippets: list[dict]) -> list[dict]:
+    segments = []
+    for snippet in snippets:
+        text = _spoken_text(str(snippet.get("text", "")))
+        if not text:
+            continue
+        start = float(snippet["start"])
+        duration = float(snippet["duration"])
+        segments.append(_segment(start, duration, text))
+    return segments
+
+
+_CAPTION_HEADER = re.compile(r"^(WEBVTT\b|NOTE\b|STYLE\b|REGION\b|Kind:|Language:)", re.IGNORECASE)
+
+
+def _spoken_text(text: str) -> str:
+    """Drop caption-file headers so they are not treated as speech."""
+    cleaned = _clean_caption_text(text)
+    if not cleaned or _CAPTION_HEADER.match(cleaned):
+        return ""
+    if "elemental media engine" in cleaned.lower():
+        return ""
+    return cleaned
 
 
 def _clean_caption_text(text: str) -> str:

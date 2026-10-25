@@ -1,16 +1,41 @@
+#yt-extract-launcher {
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  z-index: 2147483646;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: #0f0f0f;
+  color: #f1f1f1;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  font: 700 16px/36px Roboto, Arial, sans-serif;
+  cursor: pointer;
+}
+
+#yt-extract-launcher.has-results {
+  background: #cc3d3d;
+}
+
+#yt-extract-launcher.open {
+  right: 336px;
+}
+
 #yt-extract-panel {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  top: 56px;
+  right: 0;
+  bottom: 0;
   z-index: 2147483646;
   width: 320px;
   box-sizing: border-box;
   padding: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 12px;
+  overflow: auto;
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
   background: #0f0f0f;
   color: #f1f1f1;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
   font-family: Roboto, Arial, sans-serif;
   font-size: 13px;
   line-height: 1.4;
@@ -102,9 +127,39 @@
 }
 
 #yt-extract-panel .yt-extract-verdicts {
-  max-height: 240px;
   margin: 8px 0 0;
-  overflow: auto;
+}
+
+#yt-extract-panel .yt-extract-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: #f1f1f1;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+#yt-extract-panel .yt-extract-time {
+  color: #8ab4f8;
+}
+
+#yt-extract-panel .yt-extract-detail {
+  padding: 0 0 8px;
+}
+
+#yt-extract-panel .yt-extract-more {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8ab4f8;
+  font: inherit;
+  cursor: pointer;
 }
 
 #yt-extract-panel .yt-extract-verdict {

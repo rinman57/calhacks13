@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from extract.claims import _normalize, _prompt, quote_from_transcript
+from extract.claims import _chunk_plan, _in_primary, _normalize, _prompt, _researchable_quote, quote_from_transcript
 from extract.verify import cap_words, research_prompt
-from extract.youtube import _expand_languages
+from extract.youtube import _expand_languages, _parse_vtt, _spoken_text
 
 
 class QuoteTests(unittest.TestCase):
@@ -94,15 +94,51 @@ class QuoteTests(unittest.TestCase):
             segments,
         )
         by_text = {item["text"]: item for item in payload["statements"]}
-        settled = by_text["The president is on screen."]
-        self.assertFalse(settled["worth_checking"])
-        self.assertEqual(settled["research_question"], "")
+        spoken_claim = by_text["The president is on screen."]
+        self.assertTrue(spoken_claim["worth_checking"])
+        self.assertEqual(spoken_claim["preliminary_label"], "unverified")
+        self.assertEqual(spoken_claim["research_question"], "")
+        self.assertIsNone(spoken_claim["label_confidence"])
         self.assertTrue(by_text["Inflation was 9 percent."]["worth_checking"])
-        personal = by_text["I last watched a long talk years ago."]
-        self.assertFalse(personal["worth_checking"])
-        self.assertEqual(personal["research_question"], "")
-        self.assertEqual(settled["visual_note"], "")
-        self.assertEqual(payload["checkable_count"], 1)
+        self.assertNotIn("I last watched a long talk years ago.", by_text)
+        self.assertEqual(spoken_claim["visual_note"], "")
+        self.assertEqual(payload["checkable_count"], 2)
+
+    def test_later_chunk_owns_a_quote_that_starts_after_the_boundary(self):
+        segments = [
+            {"start_seconds": index * 20, "end_seconds": index * 20 + 5, "text": f"Line {index} says a fact."}
+            for index in range(10)
+        ]
+        plans = _chunk_plan(segments)
+        self.assertGreater(len(plans), 1)
+        self.assertEqual(plans[0]["primary_end"], 75.0)
+        self.assertTrue(_in_primary(60.0, plans[0], last=False))
+        self.assertFalse(_in_primary(80.0, plans[0], last=False))
+        self.assertTrue(_in_primary(80.0, plans[1], last=False))
+        self.assertTrue(plans[1]["context"])
+
+    def test_caption_file_header_is_not_speech(self):
+        self.assertEqual(_spoken_text("WEBVTT #Elemental Media Engine(TM) 2.11.0.400122"), "")
+        self.assertEqual(
+            _parse_vtt(
+                "\n".join(
+                    [
+                        "WEBVTT #Elemental Media Engine(TM) 2.11.0.400122",
+                        "",
+                        "00:00:01.540 --> 00:00:05.340",
+                        "And they say the noise causes cancer.",
+                    ]
+                )
+            ),
+            [
+                {
+                    "start_seconds": 1.54,
+                    "duration_seconds": 3.8,
+                    "end_seconds": 5.34,
+                    "text": "And they say the noise causes cancer.",
+                }
+            ],
+        )
 
     def test_english_request_includes_regional_caption_tracks(self):
         self.assertEqual(_expand_languages(["en"], ["en-US", "es"]), ["en-US"])
@@ -111,8 +147,64 @@ class QuoteTests(unittest.TestCase):
     def test_prompt_keeps_research_on_the_spoken_quote(self):
         prompt = _prompt({"title": "Talk", "channel": "Channel"}, "Hello.")
         self.assertIn("speaker's own experience", prompt)
-        self.assertIn("must not ask about a broader claim", prompt)
-        self.assertIn("unverified, misinfo, or misleading", prompt)
+        self.assertIn("Do not paraphrase", prompt)
+        self.assertIn("back in 2009,", prompt)
+        self.assertIn("44 seconds", prompt)
+        self.assertIn("would matter if it were false", prompt)
+        self.assertNotIn('kind "opinion"', prompt)
+        self.assertNotIn("preliminary_label", prompt)
+
+    def test_prompt_judges_claims_by_the_kind_of_video(self):
+        prompt = _prompt(
+            {
+                "title": "Eat Everything In A Grocery Store, Win $1,000,000",
+                "channel": "MrBeast",
+                "description": "I trapped 4 strangers in an entire supermarket.\nhttps://example.com/store\n\nLater paragraph",
+            },
+            "Hello.",
+        )
+        self.assertIn("Channel: MrBeast", prompt)
+        self.assertIn("trapped 4 strangers", prompt)
+        self.assertNotIn("https://example.com", prompt)
+        self.assertNotIn("Later paragraph", prompt)
+        self.assertIn("premise of a stunt", prompt)
+
+    def test_joke_fragments_and_talk_timing_are_not_researched(self):
+        self.assertFalse(_researchable_quote("back in 2009,"))
+        self.assertFalse(_researchable_quote("I'm at 44 seconds right now;"))
+        self.assertTrue(_researchable_quote("Inflation was 9 percent."))
+        self.assertTrue(_researchable_quote("they say the noise causes cancer"))
+        payload = _normalize(
+            {
+                "summary": "A short comic talk.",
+                "statements": [
+                    {"kind": "claim", "text": "back in 2009,", "start_seconds": 36.141, "end_seconds": 37.855},
+                    {
+                        "kind": "claim",
+                        "text": "I'm at 44 seconds right now;",
+                        "start_seconds": 57.56,
+                        "end_seconds": 59.155,
+                    },
+                    {
+                        "kind": "claim",
+                        "text": "they say the noise causes cancer",
+                        "start_seconds": 1,
+                        "end_seconds": 2,
+                    },
+                ],
+            },
+            "abc",
+            [
+                {"start_seconds": 36.141, "end_seconds": 37.855, "text": "back in 2009,"},
+                {"start_seconds": 57.56, "end_seconds": 59.155, "text": "I'm at 44 seconds right now;"},
+                {"start_seconds": 1, "end_seconds": 2, "text": "they say the noise causes cancer"},
+            ],
+        )
+        by_text = {item["text"]: item for item in payload["statements"]}
+        self.assertNotIn("back in 2009,", by_text)
+        self.assertNotIn("I'm at 44 seconds right now;", by_text)
+        self.assertTrue(by_text["they say the noise causes cancer"]["worth_checking"])
+        self.assertEqual(payload["checkable_count"], 1)
 
     def test_context_summary_stops_at_thirty_words(self):
         text = (
@@ -134,6 +226,7 @@ class QuoteTests(unittest.TestCase):
         )
         self.assertIn(f"Original transcript quote: {quote}", prompt)
         self.assertIn("Do not rewrite it.", prompt)
+        self.assertIn("did not judge whether this quote is true", prompt)
         self.assertNotIn("paraphrase", prompt.lower())
 
 

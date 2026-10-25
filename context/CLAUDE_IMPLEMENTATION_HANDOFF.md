@@ -2,7 +2,9 @@
 
 ## Objective
 
-Continue this repository after Gemini has generated `data/<video_id>/claims.json`.
+Continue this repository after claim extraction has generated `data/<video_id>/claims.json`.
+Extraction now uses Claude Haiku 5.5 on the transcript, not Gemini. Scheduling
+changes belong in `context/STREAMING_PIPELINE_HANDOFF.md`.
 Implement a working research and assessment pipeline that produces independent
 evidence, verdicts, context, and citations for the extracted claims.
 

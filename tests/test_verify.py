@@ -9,9 +9,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from extract.server import _card_sources
+from extract.server import _card_sources, _verdict_cards
 from extract.verify import (
     MAX_CONTINUATIONS,
+    RESEARCH_WORKERS,
+    _align_verdict,
+    assessor_count,
     validate_assessment,
     verify_folder,
 )
@@ -32,7 +35,38 @@ def response(stop_reason, blocks, searches=1, fetches=0):
     )
 
 
-def search_and_fetch():
+def verdict_json(verdict="contradicted", source_id="s1", passage_id="p2", gaps=None):
+    explanation = "The retrieved page says inflation was near 1.4 percent, which contradicts the claim."
+    if verdict == "insufficient_evidence":
+        body = {
+            "verdict": verdict,
+            "headline": "The saved evidence does not settle it",
+            "explanation": "No fetched page settles the claim.",
+            "context": "",
+            "evidence_refs": [],
+            "sentence_refs": [],
+            "limitations": ["No full page was retrieved."],
+            "research_gaps": gaps or ["The page could not be fetched."],
+        }
+    else:
+        body = {
+            "verdict": verdict,
+            "headline": "Inflation was not 9 percent in January 2021",
+            "explanation": explanation,
+            "context": "The comparison has to use the January 2021 CPI.",
+            "evidence_refs": [
+                {"source_id": source_id, "passage_ids": [passage_id], "supports": "contradicts_claim"}
+            ],
+            "sentence_refs": [
+                {"sentence": explanation, "source_id": source_id, "passage_ids": [passage_id]}
+            ],
+            "limitations": ["Only the saved page excerpt was assessed."],
+            "research_gaps": gaps or ["The excerpt does not name a monthly index."],
+        }
+    return json.dumps(body)
+
+
+def search_and_fetch(source_id="s1", passage_id="p2"):
     return [
         {"type": "server_tool_use", "id": "search-1", "name": "web_search", "input": {"query": "US CPI January 2021"}},
         {
@@ -62,7 +96,7 @@ def search_and_fetch():
                 },
             },
         },
-        {"type": "text", "text": '{"research_gaps": ["The excerpt does not name a monthly index."]}'},
+        {"type": "text", "text": verdict_json(source_id=source_id, passage_id=passage_id)},
     ]
 
 
@@ -217,7 +251,9 @@ class VerifyTests(unittest.TestCase):
         return client, result, evidence, verdicts
 
     def test_only_checkable_claims_keep_ids_and_skip_gemini_labels(self):
-        client, _result, evidence, verdicts = self._run([response("end_turn", search_and_fetch(), fetches=1), assessment()])
+        client, _result, evidence, verdicts = self._run(
+            [response("end_turn", search_and_fetch(), fetches=1), assessment()]
+        )
         self.assertEqual([item["claim_id"] for item in evidence["claims"]], ["c2"])
         self.assertEqual(verdicts["results"][0]["claim_id"], "c2")
         self.assertEqual((self.folder / "claims.json").read_text(encoding="utf-8"), self.original_claims)
@@ -226,8 +262,11 @@ class VerifyTests(unittest.TestCase):
         self.assertNotIn("preliminary_label", blob)
         self.assertEqual(client.messages.calls[0]["tools"][0]["name"], "web_search")
         self.assertEqual(client.messages.calls[0]["tools"][1]["name"], "web_fetch")
-        self.assertNotIn("tools", client.messages.calls[1])
         self.assertNotIn("format", client.messages.calls[0]["output_config"])
+        self.assertEqual(client.messages.calls[0]["output_config"]["effort"], "medium")
+        self.assertEqual(len(client.messages.calls), 2)
+        self.assertNotIn("tools", client.messages.calls[1])
+        self.assertEqual(client.messages.calls[1]["output_config"]["effort"], "medium")
         self.assertEqual(client.messages.calls[1]["output_config"]["format"]["type"], "json_schema")
         claim = evidence["claims"][0]
         self.assertEqual(claim["searched_queries"], ["US CPI January 2021"])
@@ -240,7 +279,11 @@ class VerifyTests(unittest.TestCase):
 
     def test_invented_reference_is_rejected(self):
         _client, _result, evidence, verdicts = self._run(
-            [response("end_turn", search_and_fetch(), fetches=1), assessment(source_id="s99"), assessment(source_id="s99")]
+            [
+                response("end_turn", search_and_fetch(), fetches=1),
+                assessment(source_id="s99"),
+                assessment(source_id="s99"),
+            ]
         )
         self.assertEqual(evidence["claims"][0]["research_status"], "complete")
         self.assertEqual(verdicts["results"][0]["assessment_status"], "failed")
@@ -289,7 +332,7 @@ class VerifyTests(unittest.TestCase):
                             "type": "web_fetch_tool_result",
                             "content": {"type": "web_fetch_tool_result_error", "error_code": "url_not_accessible"},
                         },
-                        {"type": "text", "text": '{"research_gaps": ["The page could not be fetched."]}'},
+                        {"type": "text", "text": verdict_json("insufficient_evidence", gaps=["The page could not be fetched."])},
                     ],
                 ),
                 insufficient(),
@@ -299,6 +342,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(len(evidence["claims"][0]["sources"]), 1)
         self.assertEqual(verdicts["results"][0]["verdict"], "insufficient_evidence")
         self.assertEqual(len(client.messages.calls), 2)
+        self.assertNotIn("tools", client.messages.calls[1])
         self.assertTrue(any(item.startswith("Research was partial") for item in result.warnings))
 
     def test_pause_truncation_and_continuation_limit(self):
@@ -414,6 +458,92 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(verdicts["results"][0]["assessment_status"], "skipped")
         self.assertTrue(any("deadline" in item.lower() for item in result.warnings))
 
+    def test_assessor_count_follows_claims_not_researchers(self):
+        self.assertEqual(
+            [assessor_count(n) for n in (0, 1, 4, 5, 8, 12, 13, 40)],
+            [0, 1, 1, 2, 2, 3, 4, 4],
+        )
+        self.assertNotEqual(assessor_count(1), RESEARCH_WORKERS)
+        self.assertNotEqual(assessor_count(40), RESEARCH_WORKERS)
+        from extract.verify import VerificationSession
+
+        session = VerificationSession.prepare(
+            self.folder,
+            client=FakeClient([response("end_turn", search_and_fetch(), fetches=1), assessment()]),
+            api_key=SECRET,
+            model="claude-sonnet-5-5",
+        )
+        session.submit_saved()
+        session.finish()
+        self.assertEqual(len(session.assess_threads), 1)
+
+    def test_assessor_passage_ids_use_the_saved_fetched_page(self):
+        _client, _result, _evidence, verdicts = self._run(
+            [response("end_turn", search_and_fetch(), fetches=1), assessment(passage_id="p9")]
+        )
+        self.assertEqual(verdicts["results"][0]["verdict"], "contradicted")
+        self.assertEqual(verdicts["results"][0]["evidence_refs"][0]["passage_ids"], ["p2"])
+        self.assertEqual(verdicts["results"][0]["assessment_status"], "complete")
+
+    def test_guessed_passage_ids_use_the_saved_fetched_page(self):
+        sources = [
+            {
+                "source_id": "s1",
+                "passages": [
+                    {"passage_id": "p1", "text": "CPI Home", "content_type": "search_snippet"},
+                    {"passage_id": "p2", "text": DOC, "content_type": "fetched_text"},
+                ],
+            }
+        ]
+        explanation = "The retrieved page says inflation was near 1.4 percent, which contradicts the claim."
+        cleaned = validate_assessment(
+            _align_verdict(
+                {
+                    "verdict": "contradicted",
+                    "headline": "Inflation was not 9 percent",
+                    "explanation": explanation,
+                    "context": "The comparison has to use the January 2021 CPI.",
+                    "evidence_refs": [
+                        {"source_id": "s1", "passage_ids": ["p9"], "supports": "contradicts_claim"}
+                    ],
+                    "sentence_refs": [
+                        {"sentence": explanation, "source_id": "s1", "passage_ids": ["p9"]}
+                    ],
+                    "limitations": [],
+                },
+                sources,
+            ),
+            sources,
+        )
+        self.assertEqual(cleaned["verdict"], "contradicted")
+        self.assertEqual(cleaned["evidence_refs"][0]["passage_ids"], ["p2"])
+
+    def test_snippet_only_strong_verdict_is_left_unsettled(self):
+        sources = [
+            {
+                "source_id": "s1",
+                "passages": [{"passage_id": "p1", "text": "CPI Home", "content_type": "search_snippet"}],
+            }
+        ]
+        cleaned = validate_assessment(
+            _align_verdict(
+                {
+                    "verdict": "contradicted",
+                    "headline": "Inflation was not 9 percent",
+                    "explanation": "A snippet mentions a lower rate.",
+                    "context": "",
+                    "evidence_refs": [
+                        {"source_id": "s1", "passage_ids": ["p2"], "supports": "contradicts_claim"}
+                    ],
+                    "sentence_refs": [],
+                    "limitations": [],
+                },
+                sources,
+            ),
+            sources,
+        )
+        self.assertEqual(cleaned["verdict"], "insufficient_evidence")
+
     def test_validator_rejects_unknown_passage_and_snippet_only_support(self):
         sources = [
             {
@@ -449,6 +579,32 @@ class VerifyTests(unittest.TestCase):
                 },
                 sources,
             )
+
+    def test_supported_claims_stay_in_the_file_and_off_the_cards(self):
+        verdict_path = self.folder / "verdict.json"
+        verdict_path.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "claim_id": "c2",
+                            "verdict": "supported",
+                            "assessment_status": "complete",
+                            "headline": "The rate matches.",
+                            "explanation": "Fetched pages support the quote.",
+                            "context": "He is stating an inflation figure.",
+                            "limitations": [],
+                            "research_status": "complete",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(_verdict_cards(self.folder / "claims.json", None, verdict_path), [])
+        checking = _verdict_cards(self.folder / "claims.json", None, None)
+        self.assertEqual([card["claim_id"] for card in checking], ["c2"])
+        self.assertEqual(checking[0]["assessment_status"], "checking")
 
     def test_public_cards_keep_only_http_links(self):
         cards = _card_sources(

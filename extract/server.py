@@ -123,8 +123,15 @@ class ExtractHandler(BaseHTTPRequestHandler):
 
 
 def _run_job(job_id: str, video_id: str) -> None:
-    def on_progress(stage: str) -> None:
-        _update(job_id, stage=stage)
+    def on_progress(stage: str, output_dir: Path | None = None) -> None:
+        if stage == "publish":
+            if output_dir is not None:
+                _update(job_id, result=_snapshot(output_dir))
+            return
+        fields: dict = {"stage": stage}
+        if output_dir is not None:
+            fields["result"] = _snapshot(output_dir)
+        _update(job_id, **fields)
         print(f"{video_id}: {stage}")
 
     try:
@@ -142,6 +149,29 @@ def _update(job_id: str, **fields: object) -> None:
         job = _jobs.get(job_id)
         if job is not None:
             job.update(fields)
+
+
+def _snapshot(output_dir: Path) -> dict:
+    """Read whatever this run has saved so far, for a poll while the job is still going."""
+    from extract.youtube import video_id_from_folder
+
+    def existing(name: str) -> Path | None:
+        path = output_dir / name
+        return path if path.is_file() else None
+
+    audio = next(output_dir.glob("audio.*"), None) if output_dir.is_dir() else None
+    result = ExtractionResult(
+        video_id=video_id_from_folder(output_dir.name),
+        output_dir=output_dir,
+        metadata_path=existing("metadata.json"),
+        transcript_path=existing("transcript.json"),
+        transcript_text_path=existing("transcript.txt"),
+        audio_path=audio if audio is not None and audio.is_file() else None,
+        claims_path=existing("claims.json"),
+        evidence_path=existing("evidence.json"),
+        verdict_path=existing("verdict.json"),
+    )
+    return _public_result(result)
 
 
 def _public_result(result: ExtractionResult) -> dict:
@@ -212,28 +242,73 @@ def _verdict_cards(
         for item in (_read_json_list(evidence_path, "claims"))
         if isinstance(item, dict)
     }
-    cards = []
+    hidden: set[str] = set()
+    finished: dict[str, dict] = {}
     for row in _read_json_list(verdict_path, "results"):
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or not row.get("claim_id"):
             continue
-        statement = statements.get(row.get("claim_id")) or {}
-        cards.append(
-            {
-                "claim_id": row.get("claim_id"),
-                "start_seconds": statement.get("start_seconds"),
-                "text": statement.get("text") or "",
-                "verdict": row.get("verdict"),
-                "headline": row.get("headline") or "",
-                "explanation": row.get("explanation") or "",
-                "context": row.get("context") or "",
-                "limitations": [item for item in (row.get("limitations") or []) if isinstance(item, str)],
-                "research_status": row.get("research_status"),
-                "assessment_status": row.get("assessment_status"),
-                "error": row.get("error") or _evidence_error(evidence.get(row.get("claim_id"))),
-                "sources": _card_sources(evidence.get(row.get("claim_id")), row),
-            }
-        )
-    return cards[:8]
+        claim_id = str(row.get("claim_id"))
+        if row.get("verdict") == "supported":
+            hidden.add(claim_id)
+            continue
+        finished[claim_id] = row
+
+    ordered = sorted(
+        statements.values(),
+        key=lambda item: (item.get("start_seconds") or 0, str(item.get("id") or "")),
+    )
+    cards = []
+    seen: set[str] = set()
+    for statement in ordered:
+        claim_id = str(statement.get("id") or "")
+        if not claim_id or claim_id in hidden or claim_id in seen:
+            continue
+        row = finished.get(claim_id)
+        if row is None:
+            if not statement.get("worth_checking"):
+                continue
+            cards.append(_card_from(statement, None, evidence))
+            seen.add(claim_id)
+            continue
+        cards.append(_card_from(statement, row, evidence))
+        seen.add(claim_id)
+    for claim_id, row in finished.items():
+        if claim_id in seen:
+            continue
+        cards.append(_card_from(statements.get(claim_id) or {}, row, evidence))
+    return cards
+
+
+def _card_from(statement: dict, row: dict | None, evidence: dict) -> dict:
+    if row is None:
+        return {
+            "claim_id": statement.get("id"),
+            "start_seconds": statement.get("start_seconds"),
+            "text": statement.get("text") or "",
+            "verdict": None,
+            "headline": "",
+            "explanation": "",
+            "context": "",
+            "limitations": [],
+            "research_status": "queued",
+            "assessment_status": "checking",
+            "error": None,
+            "sources": [],
+        }
+    return {
+        "claim_id": row.get("claim_id"),
+        "start_seconds": statement.get("start_seconds"),
+        "text": statement.get("text") or "",
+        "verdict": row.get("verdict"),
+        "headline": row.get("headline") or "",
+        "explanation": row.get("explanation") or "",
+        "context": row.get("context") or "",
+        "limitations": [item for item in (row.get("limitations") or []) if isinstance(item, str)],
+        "research_status": row.get("research_status"),
+        "assessment_status": row.get("assessment_status"),
+        "error": row.get("error") or _evidence_error(evidence.get(row.get("claim_id"))),
+        "sources": _card_sources(evidence.get(row.get("claim_id")), row),
+    }
 
 
 def _card_sources(evidence_claim: dict | None, row: dict) -> list[dict]:
