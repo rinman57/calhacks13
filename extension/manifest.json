@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Extract this video",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "description": "Save a YouTube video, flag its claims, and assess them against outside sources.",
   "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [

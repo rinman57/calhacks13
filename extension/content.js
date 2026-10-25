@@ -11,8 +11,19 @@ if (!globalThis.__ytExtractLoaded) {
     jobId: null,
     poll: 0,
     serverOk: false,
+    panelOpen: false,
+    cards: [],
+    activeCueId: null,
+    starting: false,
+    attempted: false,
+    requestSeq: 0,
+    processing: false,
+    manuallyOpened: new Set(),
+    manuallyClosed: new Set(),
   };
   const jobsByVideo = new Map();
+  const cardNodes = new Map();
+  let player = null;
 
   function addText(parent, tag, text) {
     const node = document.createElement(tag);
@@ -24,7 +35,12 @@ if (!globalThis.__ytExtractLoaded) {
   const panel = document.createElement("aside");
   panel.id = "yt-extract-panel";
   panel.hidden = true;
-  addText(panel, "h2", "Extract this video");
+  addText(panel, "h2", "Video checks");
+  const close = document.createElement("button");
+  close.type = "button"; close.className = "yt-extract-close"; close.textContent = "×";
+  close.setAttribute("aria-label", "Close claim list");
+  close.addEventListener("click", () => setPanelOpen(false));
+  panel.appendChild(close);
   const idLine = addText(panel, "p", "");
   idLine.className = "yt-extract-id";
   const note = addText(
@@ -51,6 +67,7 @@ if (!globalThis.__ytExtractLoaded) {
   offline.hidden = true;
   const statusLine = addText(panel, "p", "");
   statusLine.className = "yt-extract-status";
+  statusLine.setAttribute("role", "status");
   statusLine.hidden = true;
   const rows = document.createElement("ul");
   rows.hidden = true;
@@ -81,7 +98,74 @@ if (!globalThis.__ytExtractLoaded) {
   verdicts.className = "yt-extract-verdicts";
   verdicts.hidden = true;
   panel.appendChild(verdicts);
-  document.documentElement.appendChild(panel);
+  const settings = document.createElement("details");
+  settings.className = "yt-extract-settings";
+  addText(settings, "summary", "Video check settings");
+  for (const node of [note, button, followLabel, offline, rows]) settings.appendChild(node);
+  panel.appendChild(settings);
+  const launcher = document.createElement("button");
+  launcher.id = "yt-extract-launcher"; launcher.type = "button"; launcher.hidden = true;
+  launcher.textContent = "Video checks";
+  launcher.setAttribute("aria-controls", "yt-extract-panel");
+  launcher.setAttribute("aria-expanded", "false");
+  launcher.setAttribute("aria-haspopup", "true");
+  launcher.addEventListener("click", () => setPanelOpen(!state.panelOpen));
+  const announcement = document.createElement("span");
+  announcement.className = "yt-extract-sr-only";
+  announcement.setAttribute("aria-live", "polite");
+  panel.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); setPanelOpen(false); }
+  });
+  document.documentElement.append(launcher, panel, announcement);
+
+  function setPanelOpen(open) {
+    state.panelOpen = open;
+    panel.hidden = !open || !state.videoId;
+    launcher.setAttribute("aria-expanded", String(open));
+    if (open) {
+      close.focus();
+      cardNodes.get(state.activeCueId)?.scrollIntoView({ block: "nearest" });
+    } else launcher.focus();
+  }
+
+  function syncCue() {
+    const next = document.querySelector("video");
+    if (next !== player) {
+      if (player) for (const name of ["timeupdate", "seeked", "loadedmetadata"]) player.removeEventListener(name, syncCue);
+      player = next;
+      if (player) for (const name of ["timeupdate", "seeked", "loadedmetadata"]) player.addEventListener(name, syncCue);
+    }
+    const time = player?.currentTime || 0;
+    const active = player ? [...state.cards].reverse().find((card) => {
+      const start = Number(card.start_seconds);
+      const end = Math.max(Number(card.end_seconds) || start, start + 10);
+      return Number.isFinite(start) && time >= start && time <= end;
+    }) : null;
+    const changed = state.activeCueId !== (active?.claim_id || null);
+    // A manual close suppresses auto-opening for this encounter only. Seeking
+    // away and back should open the current timestamp again.
+    if (changed) state.manuallyClosed.clear();
+    state.activeCueId = active?.claim_id || null;
+    launcher.classList.toggle("is-cue", Boolean(active));
+    launcher.classList.toggle("has-flags", state.cards.length > 0);
+    launcher.textContent = active ? `${clock(active.start_seconds)} · ${capWords(active.headline || flagLabel(active), 8)}` : state.cards.length ? `${state.cards.length} flagged claim${state.cards.length === 1 ? "" : "s"}${state.processing ? " · checking more…" : ""}` : state.processing ? "Checking claims…" : "Video checks";
+    const label = active ? `Flag at ${clock(active.start_seconds)}. ${active.headline || flagLabel(active)}. Open available claims.` : "Open video checks and available claims.";
+    launcher.setAttribute("aria-label", label + (state.processing ? " Claim information is still being generated." : ""));
+    launcher.setAttribute("aria-busy", String(state.processing));
+    launcher.classList.toggle("is-loading", state.processing);
+    launcher.title = launcher.getAttribute("aria-label");
+    if (changed) announcement.textContent = active ? launcher.getAttribute("aria-label") : "";
+    for (const [id, node] of cardNodes) {
+      node.classList.toggle("at-playback", id === state.activeCueId);
+      const shouldOpen = state.manuallyOpened.has(id) || (id === state.activeCueId && !state.manuallyClosed.has(id));
+      if (node.open !== shouldOpen) node.open = shouldOpen;
+    }
+  }
+
+  function flagLabel(card) {
+    return card.verdict === "contradicted" ? "Evidence contradicts this" : "Possibly misleading";
+  }
+
 
   button.addEventListener("click", () => startExtract(state.videoId));
   followBox.addEventListener("change", () => {
@@ -97,6 +181,7 @@ if (!globalThis.__ytExtractLoaded) {
     refreshPage();
     checkServer();
     setInterval(checkServer, 4000);
+    setInterval(syncCue, 250);
   });
 
   function chromeListen() {
@@ -131,15 +216,21 @@ if (!globalThis.__ytExtractLoaded) {
 
   function refreshPage() {
     const videoId = currentVideoId();
-    panel.hidden = videoId === null;
+    launcher.hidden = videoId === null;
+    panel.hidden = videoId === null || !state.panelOpen;
     if (videoId === null) {
       stopPoll();
       state.videoId = null;
       state.jobId = null;
+      state.requestSeq += 1; state.panelOpen = false; state.starting = false;
+      showIdle();
       return;
     }
     if (videoId === state.videoId) return;
     state.videoId = videoId;
+    state.requestSeq += 1; state.panelOpen = false; panel.hidden = true;
+    state.starting = false; state.attempted = false;
+    showIdle();
     idLine.textContent = pageTitle(videoId);
     const existing = jobsByVideo.get(videoId);
     if (existing) {
@@ -155,33 +246,40 @@ if (!globalThis.__ytExtractLoaded) {
 
   function adoptJob(job) {
     const videoId = job.video_id || currentVideoId();
-    if (!videoId) return;
+    if (!videoId || videoId !== currentVideoId()) return;
+    if (state.jobId !== job.job_id) showIdle();
     state.videoId = videoId;
     state.serverOk = true;
     state.jobId = job.job_id;
     jobsByVideo.set(videoId, job.job_id);
-    panel.hidden = false;
+    launcher.hidden = false;
+    setPanelOpen(true);
     idLine.textContent = job.result?.title || pageTitle(videoId);
     showJob(job);
     if (job.status === "running") pollJob();
   }
 
   function startExtract(videoId) {
-    if (!videoId || !state.serverOk) return;
+    if (!videoId || !state.serverOk || state.starting) return;
+    const requestSeq = ++state.requestSeq;
     stopPoll();
     state.jobId = null;
+    showIdle();
+    state.starting = true; state.attempted = true;
     setBusy(true);
     showRunning("starting");
     requestExtract(videoId)
       .then((job) => {
-        if (state.videoId !== videoId) return;
+        if (state.videoId !== videoId || state.requestSeq !== requestSeq) return;
+        state.starting = false;
         state.jobId = job.job_id;
         jobsByVideo.set(videoId, job.job_id);
         showJob(job);
         pollJob();
       })
       .catch((error) => {
-        if (state.videoId !== videoId) return;
+        if (state.videoId !== videoId || state.requestSeq !== requestSeq) return;
+        state.starting = false;
         showFailure(error instanceof Error ? error.message : String(error));
       });
   }
@@ -199,7 +297,7 @@ if (!globalThis.__ytExtractLoaded) {
           if (job.status === "running") state.poll = window.setTimeout(tick, 1000);
         })
         .catch((error) => {
-          if (state.videoId !== videoId) return;
+          if (state.videoId !== videoId || state.jobId !== jobId) return;
           showFailure(error instanceof Error ? error.message : String(error));
         });
     };
@@ -214,15 +312,19 @@ if (!globalThis.__ytExtractLoaded) {
     preview.hidden = true;
     verdicts.hidden = true;
     verdicts.replaceChildren();
+    state.cards = []; cardNodes.clear(); state.activeCueId = null;
+    state.manuallyOpened.clear(); state.manuallyClosed.clear();
+    announcement.textContent = "";
+    syncCue();
     clearRows();
   }
 
   function showRunning(stage) {
     statusLine.hidden = false;
-    rows.hidden = false;
+    rows.hidden = true;
     warning.hidden = true;
     preview.hidden = true;
-    verdicts.hidden = true;
+    verdicts.hidden = state.cards.length === 0;
     statusLine.textContent = stageLabel(stage);
     for (const name of STAGES) {
       const index = STAGES.indexOf(name);
@@ -238,11 +340,15 @@ if (!globalThis.__ytExtractLoaded) {
     if (job.status === "running") {
       setBusy(true);
       showRunning(job.stage);
+      if (job.result) {
+        if (job.result.title) idLine.textContent = job.result.title;
+        renderVerdicts(job.result);
+      }
       return;
     }
     setBusy(false);
     statusLine.hidden = false;
-    rows.hidden = false;
+    rows.hidden = true;
     if (job.status === "error" && !job.result) {
       showFailure(job.error || "Extraction failed.");
       return;
@@ -254,11 +360,12 @@ if (!globalThis.__ytExtractLoaded) {
     fillFinalRows(result);
     const captionNote = captionMessage(result);
     const demandNote = geminiDemandSpike(result)
-      ? "Gemini is experiencing a demand spike, so claims were not saved. Try again in a little while."
+      ? "The claim service is busy. Please try again shortly."
       : "";
     const verifyNote = verificationMessage(result);
-    warning.hidden = !captionNote && !demandNote && !verifyNote && !(result.warnings || []).length;
-    warning.textContent = verifyNote || demandNote || captionNote || (result.warnings || [])[0] || "";
+    const visibleNote = verifyNote || demandNote || captionNote;
+    warning.hidden = !visibleNote;
+    warning.textContent = visibleNote;
     renderVerdicts(result);
     const lines = (result.verdicts || []).length
       ? []
@@ -273,8 +380,7 @@ if (!globalThis.__ytExtractLoaded) {
     statusLine.textContent = "Could not extract";
     warning.hidden = false;
     warning.textContent = message;
-    verdicts.hidden = true;
-    verdicts.replaceChildren();
+    verdicts.hidden = state.cards.length === 0;
   }
 
   function fillFinalRows(result) {
@@ -306,53 +412,95 @@ if (!globalThis.__ytExtractLoaded) {
   }
 
   function verificationMessage(result) {
-    return (result.warnings || []).find((item) => /^Research|^Assessment/.test(item)) || "";
+    const notes = (result.warnings || []).filter((item) => typeof item === "string");
+    if (notes.some((item) => /^(Research|Assessment) failed\b/.test(item))) {
+      return "Some claims could not be checked. Available results are shown.";
+    }
+    if (notes.some((item) => /^Research skipped\b/.test(item))) {
+      return "Research could not start. Check the local server setup.";
+    }
+    if (notes.some((item) => /^Claim check failed\b/.test(item))) {
+      return "Claims could not be generated. Please try again.";
+    }
+    // Partial fetch diagnostics stay in the saved files, not the viewer UI.
+    return "";
   }
 
   function renderVerdicts(result) {
-    verdicts.replaceChildren();
-    const cards = result.verdicts || [];
+    const cards = [...(result.verdicts || [])].sort((a, b) => Number(a.start_seconds || 0) - Number(b.start_seconds || 0));
+    state.cards = cards;
     verdicts.hidden = cards.length === 0;
-    for (const card of cards) {
-      const article = document.createElement("article");
-      article.className = "yt-extract-verdict";
-      const heading = document.createElement("p");
-      heading.className = "yt-extract-verdict-title";
-      const seek = document.createElement("button");
-      seek.type = "button";
-      seek.textContent = clock(card.start_seconds);
-      seek.addEventListener("click", () => seekTo(card.start_seconds));
-      heading.appendChild(seek);
-      heading.appendChild(document.createTextNode(` ${card.verdict || card.assessment_status || "Not assessed"}`));
-      article.appendChild(heading);
-      addParagraph(article, card.text);
-      addParagraph(article, capWords(card.context, 30));
-      if ((card.limitations || []).length) {
-        const list = document.createElement("ul");
-        for (const limitation of card.limitations) {
-          const item = document.createElement("li");
-          item.textContent = limitation;
-          list.appendChild(item);
-        }
-        article.appendChild(list);
-      }
-      const links = document.createElement("ul");
-      for (const source of card.sources || []) {
-        const href = safeHttpUrl(source.url);
-        if (!href) continue;
-        const item = document.createElement("li");
-        const link = document.createElement("a");
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent = source.title || href;
-        item.appendChild(link);
-        links.appendChild(item);
-      }
-      if (links.childNodes.length) article.appendChild(links);
-      if (card.error) addParagraph(article, card.error);
-      verdicts.appendChild(article);
+    const present = new Set(cards.map((card) => card.claim_id));
+    for (const [id, node] of cardNodes) {
+      if (!present.has(id)) { node.remove(); cardNodes.delete(id); }
     }
+    for (const card of cards) {
+      let article = cardNodes.get(card.claim_id);
+      if (!article) {
+        article = document.createElement("details");
+        article.className = "yt-extract-verdict";
+        article.dataset.claimId = card.claim_id;
+        const summary = document.createElement("summary");
+        summary.addEventListener("click", (event) => {
+          // Handle user toggles explicitly so programmatic playback updates do
+          // not accidentally pin every automatically opened section.
+          event.preventDefault();
+          const open = !article.open;
+          if (open) {
+            state.manuallyOpened.add(card.claim_id);
+            state.manuallyClosed.delete(card.claim_id);
+          } else {
+            state.manuallyOpened.delete(card.claim_id);
+            state.manuallyClosed.add(card.claim_id);
+          }
+          article.open = open;
+        });
+        const seek = document.createElement("button");
+        seek.type = "button"; seek.className = "yt-extract-time";
+        seek.addEventListener("click", (event) => {
+          event.preventDefault(); event.stopPropagation();
+          const current = state.cards.find((item) => item.claim_id === card.claim_id);
+          if (current) seekTo(current.start_seconds);
+        });
+        summary.appendChild(seek);
+        const description = document.createElement("span");
+        description.className = "yt-extract-flag-description";
+        summary.appendChild(description);
+        article.appendChild(summary);
+        const body = document.createElement("div"); body.className = "yt-extract-detail";
+        article.appendChild(body);
+        cardNodes.set(card.claim_id, article);
+      }
+      const signature = JSON.stringify(card);
+      if (article.dataset.signature !== signature) {
+        article.dataset.signature = signature;
+        const seek = article.querySelector(".yt-extract-time");
+        seek.textContent = clock(card.start_seconds);
+        seek.setAttribute("aria-label", `Seek to ${clock(card.start_seconds)}`);
+        const description = article.querySelector(".yt-extract-flag-description");
+        description.textContent = card.headline || flagLabel(card);
+        description.title = `${flagLabel(card)}: ${card.headline || ""}`;
+        const body = article.querySelector(".yt-extract-detail");
+        body.replaceChildren();
+        addText(body, "p", flagLabel(card)).className = "yt-extract-label";
+        addText(body, "blockquote", card.text || "");
+        addParagraph(body, shortExplanation(card.explanation || card.context));
+        const links = document.createElement("ul");
+        for (const source of card.sources || []) {
+          const href = safeHttpUrl(source.url);
+          if (!href) continue;
+          const item = document.createElement("li");
+          const link = addText(item, "a", source.title || href);
+          link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
+          links.appendChild(item);
+        }
+        if (links.childNodes.length) body.appendChild(links);
+      }
+      // Moving existing nodes preserves their native expanded state and focus.
+      const position = cards.indexOf(card);
+      if (verdicts.children[position] !== article) verdicts.insertBefore(article, verdicts.children[position] || null);
+    }
+    syncCue();
   }
 
   function addParagraph(parent, text) {
@@ -360,6 +508,16 @@ if (!globalThis.__ytExtractLoaded) {
     const node = document.createElement("p");
     node.textContent = text;
     parent.appendChild(node);
+  }
+
+  function shortExplanation(value) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    if (typeof Intl.Segmenter === "function") {
+      const sentences = new Intl.Segmenter("en", { granularity: "sentence" }).segment(text);
+      return Array.from(sentences, (item) => item.segment).slice(0, 3).join("").trim();
+    }
+    return text.split(/(?<=[.!?])\s+/).slice(0, 3).join(" ");
   }
 
   function seekTo(seconds) {
@@ -408,8 +566,13 @@ if (!globalThis.__ytExtractLoaded) {
   }
 
   function setBusy(busy) {
+    const changed = state.processing !== busy;
+    state.processing = busy;
+    statusLine.classList.toggle("is-loading", busy);
     button.disabled = busy || !state.serverOk;
     button.textContent = busy ? "Extracting" : "Extract";
+    syncCue();
+    if (changed && state.activeCueId) announcement.textContent = launcher.getAttribute("aria-label");
   }
 
   async function checkServer() {
@@ -423,7 +586,8 @@ if (!globalThis.__ytExtractLoaded) {
     offline.textContent = state.serverOk
       ? ""
       : "Start the extractor first: python -m extract.server";
-    if (!state.jobId) button.disabled = !state.serverOk;
+    if (!state.jobId && !state.starting) button.disabled = !state.serverOk;
+    if (state.serverOk && state.follow && state.videoId && !state.jobId && !state.starting && !state.attempted) startExtract(state.videoId);
   }
 
   function requestHealth() {

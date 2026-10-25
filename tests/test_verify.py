@@ -228,6 +228,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(client.messages.calls[0]["tools"][1]["name"], "web_fetch")
         self.assertNotIn("tools", client.messages.calls[1])
         self.assertNotIn("format", client.messages.calls[0]["output_config"])
+        self.assertEqual(client.messages.calls[0]["output_config"]["effort"], "medium")
         self.assertEqual(client.messages.calls[1]["output_config"]["effort"], "medium")
         self.assertEqual(client.messages.calls[1]["output_config"]["format"]["type"], "json_schema")
         claim = evidence["claims"][0]
@@ -497,6 +498,51 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(client.messages.calls, [])
         self.assertEqual(evidence["claims"], [])
         self.assertEqual(verdicts["results"], [])
+
+    def test_completed_claim_publishes_while_an_earlier_claim_is_still_running(self):
+        from unittest.mock import patch
+        from extract.verify import _empty_evidence, _skipped_verdict
+
+        self.claims["statements"][2]["worth_checking"] = True
+        self._write("claims.json", self.claims)
+        later_published = threading.Event()
+        snapshots = []
+
+        def research(_client, statement, **kwargs):
+            if statement["id"] == "c2":
+                self.assertTrue(later_published.wait(2), "Later claim must publish without waiting for the first")
+            row = _empty_evidence(statement["id"], kwargs["digest"], "complete", "")
+            row["error"] = None
+            return row
+
+        def assess(_client, statement, evidence, **kwargs):
+            row = _skipped_verdict(statement["id"], "complete", kwargs["assessment_hash"])
+            row.update(assessment_status="complete", verdict="insufficient_evidence", headline="Unsettled", explanation="No evidence.")
+            return row
+
+        def publish():
+            rows = json.loads((self.folder / "verdict.json").read_text())["results"]
+            snapshots.append({row["claim_id"] for row in rows})
+            if snapshots[-1] == {"c3"}:
+                later_published.set()
+
+        with patch("extract.verify._research_claim", side_effect=research), patch("extract.verify._assess_claim", side_effect=assess):
+            self._run([], on_publish=publish)
+        self.assertEqual(snapshots[0], {"c3"})
+        self.assertEqual(snapshots[-1], {"c2", "c3"})
+
+    def test_all_available_flags_are_sorted_without_an_eight_card_limit(self):
+        statements = [{"id": f"c{i}", "kind": "claim", "worth_checking": True,
+                       "text": "Quote", "start_seconds": i * 10, "end_seconds": i * 10 + 5}
+                      for i in range(12)]
+        self._write("claims.json", {"statements": list(reversed(statements))})
+        self._write("verdict.json", {"results": [
+            {"claim_id": item["id"], "assessment_status": "complete", "verdict": "contradicted"}
+            for item in reversed(statements)
+        ]})
+        cards = _verdict_cards(self.folder / "claims.json", None, self.folder / "verdict.json")
+        self.assertEqual([card["claim_id"] for card in cards], [f"c{i}" for i in range(12)])
+        self.assertEqual(cards[0]["end_seconds"], 5)
 
 
 if __name__ == "__main__":

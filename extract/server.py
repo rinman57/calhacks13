@@ -128,12 +128,19 @@ class ExtractHandler(BaseHTTPRequestHandler):
 
 
 def _run_job(job_id: str, video_id: str) -> None:
+    publish_lock = threading.Lock()
+
+    def on_result(result: ExtractionResult) -> None:
+        # Serialize snapshots so an older callback cannot overwrite newer cards.
+        with publish_lock:
+            _update(job_id, result=_public_result(result))
+
     def on_progress(stage: str) -> None:
         _update(job_id, stage=stage)
         print(f"{video_id}: {stage}")
 
     try:
-        result = extract_youtube(video_id, OUTPUT_ROOT, on_progress=on_progress)
+        result = extract_youtube(video_id, OUTPUT_ROOT, on_progress=on_progress, on_result=on_result)
     except Exception as exc:
         _update(job_id, status="error", stage="error", error=str(exc))
         print(f"{video_id}: error: {exc}")
@@ -235,6 +242,7 @@ def _verdict_cards(
             {
                 "claim_id": row.get("claim_id"),
                 "start_seconds": statement.get("start_seconds"),
+                "end_seconds": statement.get("end_seconds"),
                 "text": statement.get("text") or "",
                 "verdict": row.get("verdict"),
                 "headline": row.get("headline") or "",
@@ -247,7 +255,7 @@ def _verdict_cards(
                 "sources": _card_sources(evidence.get(row.get("claim_id")), row),
             }
         )
-    return cards[:8]
+    return sorted(cards, key=lambda card: (card.get("start_seconds") or 0, str(card.get("claim_id") or "")))
 
 
 def _card_sources(evidence_claim: dict | None, row: dict) -> list[dict]:

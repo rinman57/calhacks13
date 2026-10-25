@@ -25,8 +25,9 @@ from extract.transcribe import load_project_env
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_MODEL = "claude-sonnet-5-5"
+EFFORT = "medium"
 RESEARCH_PROMPT_VERSION = "research-2-context"
-ASSESS_PROMPT_VERSION = "assess-2-context"
+ASSESS_PROMPT_VERSION = "assess-3-short-explanation"
 MAX_SEARCHES = 5
 MAX_FETCHES = 5
 MAX_CONTINUATIONS = 4
@@ -70,7 +71,7 @@ Cite only source_id and passage_id values present in the evidence. A supported, 
 Keep counterevidence. Set supports on each evidence reference to supports_claim, contradicts_claim, or context.
 Each sentence_refs item copies one sentence from your explanation or context and names the passages for that sentence. Leave sentence_refs empty when there is nothing to cite.
 Separate association from causation. A related comparison is not a direct refutation. Explain rhetorical ambiguity instead of turning a metaphor into a number.
-Be concise. Do not include private reasoning. This is an automated assessment, not definitive proof.
+The explanation must be one short paragraph of two or three sentences. State the specific finding and its most important qualification or uncertainty within those sentences. Do not put bullet lists or source lists in the explanation; sources belong in the evidence references. Do not include private reasoning. This is an automated assessment, not definitive proof.
 The context field is a summary of at most 30 words for the viewer. Explain what the quoted sentence is referring to in general, using the nearby transcript. Do not repeat or rewrite the quote, and do not put citations in this field."""
 
 ASSESSMENT_SCHEMA: dict[str, Any] = {
@@ -238,6 +239,7 @@ def verify_folder(
     max_fetches: int = MAX_FETCHES,
     deadline_seconds: float = 480,
     on_progress: Any = None,
+    on_publish: Any = None,
 ) -> VerifyResult:
     """Research and assess eligible claims. Completed matching work is reused."""
     output_dir = Path(output_dir)
@@ -298,6 +300,7 @@ def verify_folder(
                 "schema_version": SCHEMA_VERSION,
                 "model": model,
                 "research_prompt": RESEARCH_PROMPT_VERSION,
+                "effort": EFFORT,
                 "max_searches": max_searches,
                 "max_fetches": max_fetches,
                 "claim_id": statement["id"],
@@ -341,6 +344,7 @@ def verify_folder(
         assessment_hash = _digest(
             {
                 "assessment_prompt": ASSESS_PROMPT_VERSION,
+                "effort": EFFORT,
                 "model": model,
                 "input_hash": digest,
                 "research_status": evidence_claim["research_status"],
@@ -394,6 +398,8 @@ def verify_folder(
                 ordered_evidence.append(evidence_claim)
                 ordered_verdicts.append(verdict_row)
             _write_pair(evidence_path, verdict_path, video_id, model, ordered_evidence, ordered_verdicts)
+        if on_publish is not None:
+            on_publish()
 
     if selected and on_progress is not None:
         on_progress("research")
@@ -589,7 +595,7 @@ def _research_claim(
                 system=RESEARCH_SYSTEM,
                 messages=list(messages),
                 tools=tools,
-                output_config={"effort": "medium"},
+                output_config={"effort": EFFORT},
             )
             blocks = _plain_blocks(response.content)
             state.absorb(blocks)
@@ -652,7 +658,7 @@ def _assess_claim(
                 system=ASSESS_SYSTEM,
                 messages=list(messages),
                 output_config={
-                    "effort": "medium",
+                    "effort": EFFORT,
                     "format": {"type": "json_schema", "schema": ASSESSMENT_SCHEMA},
                 },
             )
@@ -1061,7 +1067,13 @@ def _eligible(statements: Any) -> list[dict[str, Any]]:
                 "research_question": str(item.get("research_question") or "").strip(),
             }
         )
-    return chosen
+    def timeline_key(statement: dict[str, Any]) -> float:
+        try:
+            return max(0.0, float(statement.get("start_seconds") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    return sorted(chosen, key=timeline_key)
 
 
 def _transcript_context(segments: list[Any], start: Any, end: Any) -> str:

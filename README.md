@@ -1,8 +1,49 @@
 # calhacks13
 
+## Timestamp tooltips and live results
+
+A small **Video checks** control sits at the top left of a YouTube watch page.
+When playback reaches an available flagged quote, it becomes a highlighted
+tooltip with the timestamp and a short flag description. Click it to open a
+dropdown of all available flags in timestamp order. Each row initially shows
+only its timestamp and short description; click the row to expand the original
+quote, a short explanation of at most three sentences, and source links. Only
+source links appear in the list below the explanation; additional context and
+limitations remain in the saved artifacts. New assessments are instructed to
+include their key qualification within the two- or three-sentence paragraph. Clicking the
+timestamp itself seeks the player. Close the dropdown with × or Escape.
+
+Claims are queued chronologically after the initial extraction finishes. Up to
+three are checked concurrently, and each completed assessment is saved and
+published immediately; a slow earlier claim does not hold back a later flag.
+Polling continues while research runs, and expanded rows stay open as new flags
+arrive. This does not yet stream extraction from transcript chunks: the first
+model call still builds the full quote list before research begins.
+
+The tooltip follows playback from a flagged quote's start until its end, with a
+minimum ten-second window for short quotes. It clears outside that interval and
+reactivates when seeking back. Future flags do not trigger early. If research
+finishes after the viewer has already passed that interval, the flag remains in
+the dropdown and will cue on a later replay. A spinner on the tooltip and status
+line shows when claim information is still being generated, including while
+some flags are already available. The current timestamp's section opens
+automatically; previous automatic sections close as playback moves on. Sections
+the user explicitly opens stay open until manually closed. Manually closing the
+current section keeps it closed for that encounter; seeking away and back opens
+it again. These choices reset when switching videos or starting a fresh scan.
+Only completed contradicted or
+misleading results appear; supported and unresolved claims retain the existing
+saved-file behavior. An empty dropdown does not verify the whole video.
+
+After this update, restart the Python server, reload the extension at
+`chrome://extensions`, and refresh YouTube. Controls for starting a scan and
+following new videos are inside **Video check settings** in the dropdown.
+
 YouTube claim companion for Cal Hacks. The product idea, from the [shared planning thread](https://chatgpt.com/s/cx_6adc5c157b8c8191b8867720e12bcee0), is to watch an explanatory video, find factual claims, and attach evidence to the timestamp where each claim was said.
 
 Given a public YouTube URL, the pipeline saves a timestamped transcript, asks Claude Sonnet 5.5 for a quote list, then asks Claude Sonnet 5.5 to research and assess the checkable claims. It does not download the picture.
+
+Claim extraction uses Sonnet at low effort; research and assessment use medium effort. The model remains `claude-sonnet-5-5`; “Light” refers to the extraction effort setting, not a separate model.
 
 ## What this step saves
 
@@ -58,9 +99,9 @@ Leave that process running. Then in Chrome:
 2. Turn on Developer mode.
 3. Choose Load unpacked and select the `extension` folder in this repo.
 4. Open a YouTube watch page. Reload the tab if it was already open.
-5. Use the **Extract this video** panel at the bottom right, or the extension button. After an extension update, click the reload icon on `chrome://extensions` before trying the button again.
+5. Click **Video checks** at the top left. Open **Video check settings** and choose **Extract**, or use the extension toolbar button. After an extension update, reload it at `chrome://extensions` and refresh YouTube.
 
-The panel shows each stage: details, captions, then claims. Audio is saved only when the captions are missing. Finished files land in `data/<video_id>_<timestamp>/`. Checking **Run this on each video played in this tab** runs the same extraction when the watch URL changes in that tab.
+The dropdown shows progress while flags arrive individually. Audio is saved only when the captions are missing. Finished files land in `data/<video_id>_<timestamp>/`. Checking **Run this on each video played in this tab** inside the settings starts a new extraction when the watch URL changes in that tab.
 
 The command-line extractor is the same work without the page:
 

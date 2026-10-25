@@ -111,6 +111,7 @@ def extract_youtube(
     *,
     languages: list[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
+    on_result: Callable[[ExtractionResult], None] | None = None,
 ) -> ExtractionResult:
     """Save metadata and a timestamped transcript for one video."""
     requested = languages or ["en"]
@@ -198,8 +199,20 @@ def extract_youtube(
         from extract.verify import VerifyConfigError, verify_folder
 
         progress("research")
+
+        def publish_verification() -> None:
+            # Each assessment is already saved atomically by the verifier.
+            evidence = output_dir / "evidence.json"
+            verdict = output_dir / "verdict.json"
+            if evidence.is_file():
+                result.evidence_path = evidence
+            if verdict.is_file():
+                result.verdict_path = verdict
+            if on_result is not None:
+                on_result(result)
+
         try:
-            verified = verify_folder(output_dir, on_progress=progress)
+            verified = verify_folder(output_dir, on_progress=progress, on_publish=publish_verification)
             result.evidence_path = verified.evidence_path
             result.verdict_path = verified.verdict_path
             result.warnings.extend(verified.warnings)

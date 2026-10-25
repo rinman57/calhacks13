@@ -209,7 +209,7 @@ class QuoteTests(unittest.TestCase):
 
     def test_prompt_keeps_research_on_the_spoken_quote(self):
         prompt = _prompt({"title": "Talk", "channel": "Channel"}, "Hello.")
-        self.assertIn("speaker's own experience", prompt)
+        self.assertIn("speaker's own memories", prompt)
         self.assertIn("Do not paraphrase", prompt)
         self.assertNotIn("preliminary_label", prompt)
 
