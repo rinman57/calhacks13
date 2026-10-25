@@ -13,25 +13,25 @@ data/<video_id>_<YYYY-MM-DD>_<HH-MM-SS>_<PDT or PST>/
   metadata.json           title, channel, duration, caption languages
   transcript.json         timestamped segments, when captions or Cartesia succeed
   transcript.txt          the same segments as [mm:ss.mmm] lines
-  audio.m4a               audio file, only when captions are missing
+  audio.m4a               audio file, only when no usable captions are available
   claims.json             exact quotes worth exploring
   evidence.json           sources the researcher actually retrieved
   verdict.json            the assessor's verdict for each researched claim
   extraction_report.json  which files were written, plus any warnings
 ```
 
-The folder timestamp is the local Pacific time when that extract started. October is daylight-saving time, so those folders are labeled `PDT`.
+The folder timestamp is the local Pacific time when that extract started. The label is `PDT` during daylight-saving time and `PST` otherwise.
 
-Haiku keeps a quote only when it would matter if it were false. It uses the channel, the title, and the description to tell a news or explainer video from a challenge, comedy, or vlog, and it skips the plot of an entertainment video. It does not decide whether a kept claim is true. On a long transcript it reads chronological chunks, and each checkable quote is sent on as soon as that chunk is saved. Sonnet research runs for statements with `kind` `claim`.
+Haiku keeps a quote only when it would matter if it were false. It reads the channel, the title, and the first paragraph of the description, so a news or explainer video is treated differently from a challenge, comedy, or vlog. It skips jokes, the speaker's own experience, fragments, talk-timing asides, and the plot or scoreboard of an entertainment video. A product, health, or public-money fact inside that kind of video can still be kept. Haiku does not decide whether a kept claim is true. On a long transcript it reads chronological chunks of about 75 seconds, and each checkable quote is sent to research as soon as that chunk is saved. Only statements saved as `kind` `claim` are researched.
 
-Transcript segments keep the caption wording and times. Nothing in this step decides whether a statement is true.
+Transcript segments keep the caption wording and times.
 
 Caption lookup tries two sources, in order:
 
 1. `youtube-transcript-api`, which prefers a manual caption track over automatic captions.
 2. yt-dlp's caption download (`json3`, then WebVTT) if the first source fails.
 
-Metadata still lists the caption languages YouTube advertises when the caption text itself cannot be downloaded.
+A track with no spoken words, such as a WebVTT header, is skipped. If every track is unusable, or the caption download fails, the pipeline downloads audio and transcribes it with Cartesia `ink-whisper`. That key is `CARTESIA_API_KEY` in `.env`. Metadata still lists the caption languages YouTube advertises when the caption text itself cannot be downloaded.
 
 ## Try it on a YouTube page
 
@@ -50,9 +50,9 @@ Leave that process running. Then in Chrome:
 2. Turn on Developer mode.
 3. Choose Load unpacked and select the `extension` folder in this repo.
 4. Open a YouTube watch page. Reload the tab if it was already open.
-5. Use the **Extract this video** panel at the bottom right, or the extension button. After an extension update, click the reload icon on `chrome://extensions` before trying the button again.
+5. A small icon sits at the top right. Click it to open a sidebar, then choose **Extract**. The extension button can start the same check. After an extension update, click the reload icon on `chrome://extensions`, then refresh the YouTube tab.
 
-The panel shows each stage: details, captions, then claims. Audio is saved only when the captions are missing. Finished files land in `data/<video_id>_<timestamp>/`. Checking **Run this on each video played in this tab** runs the same extraction when the watch URL changes in that tab.
+The sidebar stays closed until that icon is clicked. A status line names the current stage, and rows appear as verdicts finish. Each row is a timestamp and a verdict. Click a timestamp to seek the player. Click the row for the quote, a one or two sentence explanation, the sources, and a longer explanation. Claims marked `supported` stay in `verdict.json` and are left out of the list. Finished files land in `data/<video_id>_<timestamp>/`. **Run this on each video played in this tab** is on unless it has been turned off, and it starts a new extract when the watch URL changes in that tab.
 
 The command-line extractor is the same work without the page:
 
@@ -80,9 +80,11 @@ python -m extract.verify data/<video folder> --limit 1
 
 An English request also accepts a regional track such as `en-US`, so a listed caption is used before speech-to-text. Saved media stays in `data/` and is gitignored.
 
+Put the API keys in `.env` in the project folder. `ANTHROPIC_API_KEY` is used for claim extraction, research, and assessment. `CARTESIA_API_KEY` is used only when no usable captions are available. `.env` is gitignored.
+
 ## Research and assessment
 
-After a checkable quote is saved, a coordinator gives it to a research worker. Up to three claims are researched at once. When that research finishes, a shared assessor writes the verdict. Assessors are not paired with researchers: one assessor covers four claims, with at least one assessor and at most four. Both steps use Claude Sonnet 5.5. The search and fetch limits are unchanged. The model id is `claude-sonnet-5-5`. Set `ANTHROPIC_MODEL` to use a different id. The key is `ANTHROPIC_API_KEY` in `.env`, which is gitignored. A claim marked `supported` is kept in `verdict.json` and left off the page panel.
+After a checkable quote is saved, a coordinator gives it to a research worker. Up to three claims are researched at once. When research for a claim finishes, a shared assessor writes the verdict. One assessor covers four claims: one assessor for 1–4 claims, two for 5–8, three for 9–12, and four from 13 on. Both steps use Claude Sonnet 5.5. The model id is `claude-sonnet-5-5`. Set `ANTHROPIC_MODEL` to use a different id.
 
 1. The researcher can search the web and fetch pages, at most 5 searches and 5 fetches for a claim. Python writes `evidence.json` from the tool results it observed. Search snippets stay labeled as snippets. A passage is `fetched_text` only when its quotation is found in the fetched page.
 2. A separate assessor call, with no web access, reads that saved evidence and writes the verdict. `verdict.json` is one of `supported`, `contradicted`, `misleading`, `insufficient_evidence`, or `not_checkable`.
@@ -91,33 +93,13 @@ After a checkable quote is saved, a coordinator gives it to a research worker. U
 
 These verdicts are automated assessments, not definitive proof. Web fetch does not run JavaScript, so some pages come back empty. The researcher can miss sources, and a demand spike or a cutoff is recorded as a failed or partial research status instead of being turned into `insufficient_evidence`.
 
-On a watch page the panel stays hidden behind a small icon at the top right. Open it for a sidebar of timestamps and verdicts. Choose one for the quote, a one or two sentence explanation, the sources, and a longer explanation. A timestamp seeks the YouTube player. Supported claims are not shown. Reload the extension on `chrome://extensions` after pulling these panel changes, then refresh the YouTube tab.
+Use this on videos the team is allowed to process. The page panel and the command save the transcript, and the audio only when no usable captions are available. YouTube's developer policies restrict storing audiovisual content for API clients. The official captions API also only downloads captions for videos the caller can edit, so this step uses public page data instead of that API.
 
-Use this on videos the team is allowed to process. The page panel and the command save the transcript, and the audio only when captions are missing. YouTube's developer policies restrict storing audiovisual content for API clients. The official captions API also only downloads captions for videos the caller can edit, so this step uses public page data instead of that API.
+## When captions fail
 
-## What a real run showed
-
-Checked on 24 Oct 2026 with [Me at the zoo](https://www.youtube.com/watch?v=jNQXAC9IVRw) (`jNQXAC9IVRw`, 19 seconds, channel `jawed`).
-
-| File | Result |
-| --- | --- |
-| `metadata.json` | Title, channel, duration 19s, public availability |
-| `audio.m4a` | 302 KB audio-only M4A |
-| `video.mp4` | 614 KB MP4. The file contains both a video track and an audio track |
-| Captions | Listed, then blocked. See below |
-
-YouTube reported manual captions in `en` and `de`, and automatic captions in `en` and `de`. The text never downloaded:
-
-- `youtube-transcript-api` returned `IpBlocked`.
-- yt-dlp's caption request returned HTTP 429 from `youtube.com/api/timedtext`.
-
-Media downloads from `googlevideo.com` succeeded on the same run. So a missing transcript here means the caption endpoint refused the request. It does not mean the video has no captions. The report records that distinction in `caption_languages` and `transcript_error`.
-
-Before Node and the `yt-dlp-ejs` solver were enabled, yt-dlp only offered separate video and audio streams for this upload, and the combined MP4 request failed. After the solver ran, the combined MP4 downloaded.
-
-ffmpeg is not installed on this machine, so the check stopped at that combined file.
+If YouTube lists captions but the text cannot be downloaded, the folder still gets metadata. `caption_languages` lists the advertised tracks, and `transcript_error` records the refusal. A missing caption file does not mean the video has no captions. The pipeline then downloads audio and asks Cartesia for a transcript. It does not download the picture.
 
 ## What is deferred
 
 - A marker drawn on the YouTube timeline. Verdict timestamps seek the player, but they are not yet pins on the scrubber.
-- Live tab capture of only the audio and frames that have already played. The page panel downloads the whole video from its URL instead.
+- Live capture of only the audio that has already played. The page panel requests the full public transcript for the open URL.

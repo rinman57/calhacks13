@@ -23,6 +23,10 @@ from extract.transcribe import load_project_env
 MODEL = "claude-haiku-5-5"
 EFFORT = "low"
 KINDS = ("claim",)
+RESEARCH_BASES = (
+    "health_safety", "science_environment", "money_law", "public_affairs",
+    "product_capability", "other_material_fact",
+)
 
 # The model returns only this thin object. Python fills the remaining claims.json
 # fields so a later stage can judge the quote without a second wait here.
@@ -41,8 +45,9 @@ EXTRACT_SCHEMA = {
                     "text": {"type": "string"},
                     "start_seconds": {"type": "number"},
                     "end_seconds": {"type": "number"},
+                    "research_basis": {"type": "string", "enum": [*RESEARCH_BASES, "skip"]},
                 },
-                "required": ["kind", "text", "start_seconds", "end_seconds"],
+                "required": ["kind", "text", "start_seconds", "end_seconds", "research_basis"],
             },
         },
     },
@@ -150,6 +155,16 @@ Channel: {channel}
 Write one sentence summarizing this part of the transcript.
 
 Then list only the statements worth separating. Return an empty list when nothing here would matter if it were false.
+Research consumes paid web calls. Prefer precision over coverage: a factual-sounding sentence alone is not enough. There is no minimum number of claims to return.
+Before including a quote, require ALL THREE:
+1. The speaker asserts a complete, specific fact, with enough nearby context to know what it refers to.
+2. Independent public evidence could realistically settle it. The video's own footage, private experience, challenge inventory, or scoreboard is not independent public evidence.
+3. Being wrong would materially affect a viewer's understanding or decisions about health, safety, science, money, law, products, or public affairs. Trivia and incidental scene-setting do not qualify.
+Set research_basis to health_safety, science_environment, money_law, public_affairs, product_capability, or other_material_fact only when these tests pass. other_material_fact must meet the same materiality test; it is not a catch-all for anything factual. Omit rejected lines; if a rejected candidate is returned, set research_basis to skip.
+Do not fill a quota, research a fragment by inventing its missing assertion, or collect multiple overlapping quotes for the same assertion within this chunk. Prefer one complete quote with its material qualifiers.
+- Skip predictions about this video's outcome, hypothetical examples, promotional promises, rhetorical questions, and broad accusations without a specific checkable assertion.
+- Examples to omit: "Produce is the first thing that's gonna go bad" as incidental challenge narration; "This could take a year" as a guess about the stunt; "there's too much money involved with sugar the" as an incomplete accusation.
+- Examples to keep: a specific claim about a food's health effects, a product's independently testable capability, or a public official's dated economic statistic. Entertainment context does not disqualify these.
 - kind "claim" is a complete quote a viewer could take as a fact about the world outside this video. It is specific enough to check, and it would matter if it were false.
 - News, documentaries, explainers, and commentary can contain claims about health, science, money, law, products, public events, or what someone did.
 - Entertainment, challenges, comedy, pranks, gameplay, vlogs, and stunts: the story of the video is not a claim. Skip the score, the rules of the bit, how long they have been filming, what they just ate or did, who is ahead, and the prize for this challenge. "The store has 4.3 million calories" and "around 80 calories of blueberries on the floor" are the premise of a stunt, not claims.
@@ -223,6 +238,10 @@ def _statements_from_model(raw: dict, segments: list) -> list[dict]:
             continue
         if item.get("kind") not in KINDS:
             continue
+        # Admission is explicit: missing or rejected classifications never launch
+        # paid research, even if the returned wording looks like a factual quote.
+        if item.get("research_basis") not in RESEARCH_BASES:
+            continue
         start = _seconds(item.get("start_seconds"))
         end = max(start, _seconds(item.get("end_seconds")))
         text, start, end = quote_from_transcript(segments, start, end, proposed)
@@ -240,6 +259,7 @@ def _statements_from_model(raw: dict, segments: list) -> list[dict]:
                 "label_confidence": None,
                 "why_this_label": "",
                 "research_question": "",
+                "research_basis": item["research_basis"],
             }
         )
     statements.sort(key=lambda item: (item["start_seconds"], item["end_seconds"], item["text"]))

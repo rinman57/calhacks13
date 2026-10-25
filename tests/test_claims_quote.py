@@ -58,6 +58,7 @@ class QuoteTests(unittest.TestCase):
                     {
                         "kind": "claim",
                         "text": "The president is on screen.",
+                        "research_basis": "skip",
                         "start_seconds": 1,
                         "end_seconds": 2,
                         "worth_checking": True,
@@ -69,6 +70,7 @@ class QuoteTests(unittest.TestCase):
                     {
                         "kind": "claim",
                         "text": "Inflation was 9 percent.",
+                        "research_basis": "public_affairs",
                         "start_seconds": 3,
                         "end_seconds": 4,
                         "worth_checking": True,
@@ -94,7 +96,8 @@ class QuoteTests(unittest.TestCase):
             segments,
         )
         by_text = {item["text"]: item for item in payload["statements"]}
-        spoken_claim = by_text["The president is on screen."]
+        self.assertNotIn("The president is on screen.", by_text)
+        spoken_claim = by_text["Inflation was 9 percent."]
         self.assertTrue(spoken_claim["worth_checking"])
         self.assertEqual(spoken_claim["preliminary_label"], "unverified")
         self.assertEqual(spoken_claim["research_question"], "")
@@ -102,7 +105,7 @@ class QuoteTests(unittest.TestCase):
         self.assertTrue(by_text["Inflation was 9 percent."]["worth_checking"])
         self.assertNotIn("I last watched a long talk years ago.", by_text)
         self.assertEqual(spoken_claim["visual_note"], "")
-        self.assertEqual(payload["checkable_count"], 2)
+        self.assertEqual(payload["checkable_count"], 1)
 
     def test_later_chunk_owns_a_quote_that_starts_after_the_boundary(self):
         segments = [
@@ -178,16 +181,18 @@ class QuoteTests(unittest.TestCase):
             {
                 "summary": "A short comic talk.",
                 "statements": [
-                    {"kind": "claim", "text": "back in 2009,", "start_seconds": 36.141, "end_seconds": 37.855},
+                    {"kind": "claim", "research_basis": "public_affairs", "text": "back in 2009,", "start_seconds": 36.141, "end_seconds": 37.855},
                     {
                         "kind": "claim",
                         "text": "I'm at 44 seconds right now;",
+                        "research_basis": "other_material_fact",
                         "start_seconds": 57.56,
                         "end_seconds": 59.155,
                     },
                     {
                         "kind": "claim",
                         "text": "they say the noise causes cancer",
+                        "research_basis": "health_safety",
                         "start_seconds": 1,
                         "end_seconds": 2,
                     },
@@ -205,6 +210,44 @@ class QuoteTests(unittest.TestCase):
         self.assertNotIn("I'm at 44 seconds right now;", by_text)
         self.assertTrue(by_text["they say the noise causes cancer"]["worth_checking"])
         self.assertEqual(payload["checkable_count"], 1)
+
+    def test_unqualified_candidates_never_reach_the_research_callback(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from extract.claims import extract_claims
+
+        cases = [
+            ("The store has 4.3 million calories of food.", "skip"),
+            ("This could take us over a year.", "skip"),
+            ("I ate breakfast at home today.", None),
+            ("there's too much money involved with sugar the", "unknown"),
+            ("they say the noise causes cancer", "health_safety"),
+            ("Inflation was 9 percent.", "public_affairs"),
+        ]
+        segments, candidates = [], []
+        for index, (text, basis) in enumerate(cases):
+            segment = {"text": text, "start_seconds": index * 3, "end_seconds": index * 3 + 2}
+            segments.append(segment)
+            candidate = {"kind": "claim", **segment}
+            if basis is not None:
+                candidate["research_basis"] = basis
+            candidates.append(candidate)
+        submitted = []
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            (path / "metadata.json").write_text(json.dumps({"video_id": "abc"}))
+            (path / "transcript.json").write_text(json.dumps({"segments": segments}))
+            with patch("extract.claims.load_project_env"), patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "test-key"}
+            ), patch("extract.claims._generate", return_value={"summary": "Clip", "statements": candidates}):
+                result = extract_claims(path, on_claim=submitted.append)
+            saved = json.loads(result.read_text())
+        self.assertEqual([item["text"] for item in submitted], [text for text, _ in cases[-2:]])
+        self.assertEqual(saved["checkable_count"], 2)
+        self.assertTrue(all(item["worth_checking"] for item in submitted))
+        self.assertEqual(submitted[0]["research_basis"], "health_safety")
 
     def test_context_summary_stops_at_thirty_words(self):
         text = (
