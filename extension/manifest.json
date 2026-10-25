@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Extract this video",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Save a YouTube video, flag its claims, and assess them against outside sources.",
   "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": [
@@ -13,8 +13,26 @@
   },
   "action": {
     "default_title": "Extract this video",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/logo.png"],
+      "matches": ["https://www.youtube.com/*"]
+    }
+  ],
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],

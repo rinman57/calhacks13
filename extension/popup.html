@@ -28,6 +28,16 @@
         opacity: 0.55;
         cursor: default;
       }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .brand img {
+        width: 32px;
+        height: 32px;
+        display: block;
+      }
       p {
         margin: 8px 0 0;
         color: #cccccc;
@@ -38,7 +48,10 @@
     </style>
   </head>
   <body>
-    <strong>Extract this video</strong>
+    <div class="brand">
+      <img src="icons/logo.png" alt="" width="32" height="32" />
+      <strong>Extract this video</strong>
+    </div>
     <p id="status">Checking the local extractor.</p>
     <button id="extract" type="button" disabled>Extract the open video</button>
     <script src="popup.js"></script>

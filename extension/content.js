@@ -32,10 +32,19 @@ if (!globalThis.__ytExtractLoaded) {
     return node;
   }
 
+  const logoUrl = chrome.runtime.getURL("icons/logo.png");
   const panel = document.createElement("aside");
   panel.id = "yt-extract-panel";
   panel.hidden = true;
-  addText(panel, "h2", "Video checks");
+  const brand = document.createElement("div");
+  brand.className = "yt-extract-brand";
+  const logo = document.createElement("img");
+  logo.className = "yt-extract-logo";
+  logo.alt = "";
+  logo.src = logoUrl;
+  brand.appendChild(logo);
+  addText(brand, "h2", "Video checks");
+  panel.appendChild(brand);
   const close = document.createElement("button");
   close.type = "button"; close.className = "yt-extract-close"; close.textContent = "×";
   close.setAttribute("aria-label", "Close claim list");
@@ -105,7 +114,14 @@ if (!globalThis.__ytExtractLoaded) {
   panel.appendChild(settings);
   const launcher = document.createElement("button");
   launcher.id = "yt-extract-launcher"; launcher.type = "button"; launcher.hidden = true;
-  launcher.textContent = "Video checks";
+  const launcherLogo = document.createElement("img");
+  launcherLogo.className = "yt-extract-logo";
+  launcherLogo.alt = "";
+  launcherLogo.src = logoUrl;
+  const launcherLabel = document.createElement("span");
+  launcherLabel.className = "yt-extract-launcher-label";
+  launcherLabel.textContent = "Video checks";
+  launcher.append(launcherLogo, launcherLabel);
   launcher.setAttribute("aria-controls", "yt-extract-panel");
   launcher.setAttribute("aria-expanded", "false");
   launcher.setAttribute("aria-haspopup", "true");
@@ -148,7 +164,7 @@ if (!globalThis.__ytExtractLoaded) {
     state.activeCueId = active?.claim_id || null;
     launcher.classList.toggle("is-cue", Boolean(active));
     launcher.classList.toggle("has-flags", state.cards.length > 0);
-    launcher.textContent = active ? `${clock(active.start_seconds)} · ${capWords(active.headline || flagLabel(active), 8)}` : state.cards.length ? `${state.cards.length} flagged claim${state.cards.length === 1 ? "" : "s"}${state.processing ? " · checking more…" : ""}` : state.processing ? "Checking claims…" : "Video checks";
+    launcherLabel.textContent = active ? `${clock(active.start_seconds)} · ${capWords(active.headline || flagLabel(active), 8)}` : state.cards.length ? `${state.cards.length} flagged claim${state.cards.length === 1 ? "" : "s"}${state.processing ? " · checking more…" : ""}` : state.processing ? "Checking claims…" : "Video checks";
     const label = active ? `Flag at ${clock(active.start_seconds)}. ${active.headline || flagLabel(active)}. Open available claims.` : "Open video checks and available claims.";
     launcher.setAttribute("aria-label", label + (state.processing ? " Claim information is still being generated." : ""));
     launcher.setAttribute("aria-busy", String(state.processing));
@@ -569,6 +585,7 @@ if (!globalThis.__ytExtractLoaded) {
     const changed = state.processing !== busy;
     state.processing = busy;
     statusLine.classList.toggle("is-loading", busy);
+    panel.classList.toggle("is-loading", busy);
     button.disabled = busy || !state.serverOk;
     button.textContent = busy ? "Extracting" : "Extract";
     syncCue();
