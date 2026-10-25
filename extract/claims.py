@@ -1,11 +1,11 @@
 """Preliminary claim list for one saved transcript.
 
-This is step 2 of the pipeline. A fast model copies checkable quotes out of the
+This is step 2 of the pipeline. Claude Sonnet copies checkable quotes out of the
 timestamped transcript and omits opinions and nonliteral speech. It does not search the
 web, watch the video, or decide whether a quote is true. The researcher and
 assessor do that later.
 
-The model is Claude Haiku 5.5. Structured output forces the claims.json shape.
+The model is Claude Sonnet 5.5. Structured output forces the claims.json shape.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from pathlib import Path
 
 from extract.transcribe import load_project_env
 
-MODEL = "claude-haiku-5-5"
-EFFORT = "low"
+MODEL = "claude-sonnet-5-5"
+EFFORT = "medium"
 KINDS = ("claim", "opinion", "joke", "sarcasm", "unclear")
 SELECTION_VERSION = "checkworthiness-3"
 
@@ -87,7 +87,8 @@ def extract_claims(output_dir: Path) -> Path:
         video_id = video_id_from_folder(output_dir.name)
 
     raw = _generate(api_key, _prompt(metadata, transcript))
-    payload = _normalize(raw, video_id, _transcript_segments(output_dir))
+    segments = _transcript_segments(output_dir)
+    payload = _normalize(raw, video_id, segments)
     path = output_dir / "claims.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
@@ -140,7 +141,7 @@ TRANSCRIPT
 def _generate(api_key: str, prompt: str) -> dict:
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key, max_retries=1, timeout=45.0)
+    client = anthropic.Anthropic(api_key=api_key, max_retries=1, timeout=90.0)
     try:
         response = client.messages.create(
             model=MODEL,

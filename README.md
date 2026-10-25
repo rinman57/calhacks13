@@ -2,7 +2,7 @@
 
 YouTube claim companion for Cal Hacks. The product idea, from the [shared planning thread](https://chatgpt.com/s/cx_6adc5c157b8c8191b8867720e12bcee0), is to watch an explanatory video, find factual claims, and attach evidence to the timestamp where each claim was said.
 
-Given a public YouTube URL, the pipeline saves a timestamped transcript, asks Claude Haiku 5.5 for a fast quote list, then asks Claude Sonnet 5.5 to research and assess the checkable claims. It does not download the picture.
+Given a public YouTube URL, the pipeline saves a timestamped transcript, asks Claude Sonnet 5.5 for a quote list, then asks Claude Sonnet 5.5 to research and assess the checkable claims. It does not download the picture.
 
 ## What this step saves
 
@@ -22,7 +22,7 @@ data/<video_id>_<YYYY-MM-DD>_<HH-MM-SS>_<PDT or PST>/
 
 The folder timestamp is the local Pacific time when that extract started. October is daylight-saving time, so those folders are labeled `PDT`.
 
-Haiku reads the full transcript together with the title, channel, and description. It uses surrounding dialogue, attribution, setup/punchline, and nearby rebuttals to distinguish serious factual assertions from jokes, opinions, sarcasm, satire, and personal remarks. It selects only complete, independently checkable claims whose accuracy would materially affect the viewer's understanding or decisions. Stunt inventory, scores, ordinary trivia, and unclear fragments are omitted. It does not decide truth. Python discards non-claim candidates and anything without an explicit boolean `worth_checking: true`; rejected candidates do not enter `claims.json` or research. Empty output is valid.
+Sonnet reads the full transcript together with the title, channel, and description. It uses surrounding dialogue, attribution, setup/punchline, and nearby rebuttals to distinguish serious factual assertions from jokes, opinions, sarcasm, satire, and personal remarks. It selects only complete, independently checkable claims whose accuracy would materially affect the viewer's understanding or decisions. Stunt inventory, scores, ordinary trivia, and unclear fragments are omitted. It does not decide truth. Python discards non-claim candidates and anything without an explicit boolean `worth_checking: true`; rejected candidates do not enter `claims.json` or research. Empty output is valid.
 
 The selection prompt uses a three-way rubric inspired by [ClaimBuster's research](https://idir.uta.edu/~naeemul/file/claimbuster-cikm15-hassan-poster.pdf): nonfactual speech, unimportant facts, and check-worthy facts. Only the last group qualifies. It explicitly rejects isolated arithmetic and arbitrary statistics used as filler, requires a concrete material consequence, and permits whole videos with no candidates. Applied calculations with real consequences remain eligible. This is a prompt adaptation, not a ClaimBuster API integration or a validated reproduction of its classifier.
 

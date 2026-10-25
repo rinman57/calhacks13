@@ -48,7 +48,10 @@ class ExtractHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/health":
-            self._send_json({"ok": True, "selection_version": SELECTION_VERSION})
+            self._send_json({
+                "ok": True,
+                "selection_version": SELECTION_VERSION,
+            })
             return
         if path in {"/extension/content.js", "/extension/content.css"}:
             self._send_file(ROOT / path.lstrip("/"))

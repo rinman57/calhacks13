@@ -29,7 +29,7 @@ video input, which this pipeline does not use.
 
 ## Models
 
-- Extractor: `claude-haiku-5-5` at effort `low`. Its only job is a one-sentence
+- Extractor: `claude-sonnet-5-5` at effort `medium`. Its only job is a one-sentence
   summary plus exact quotes marked `claim` or `opinion`, with transcript times.
   It does not assign truth labels, confidence, explanations, or research
   questions. Python fills those `claims.json` fields so the file shape stays
@@ -38,7 +38,7 @@ video input, which this pipeline does not use.
   empty. `visual_note` stays empty.
 - Researcher and assessor: `claude-sonnet-5-5` at effort `medium`. The researcher
   decides what factual assertion the quote itself makes and gathers evidence.
-  The assessor writes the verdict. Do not move that judgment back onto Haiku.
+  The assessor writes the verdict. Do not move that judgment back onto the extractor.
 
 Do not add a model call that summarizes earlier chunks. If a chunk needs prior
 context, paste a few of the preceding transcript lines and tell the extractor
@@ -46,7 +46,7 @@ not to emit claims from those lines.
 
 ## Current implementation to build on
 
-- `extract/claims.py` sends the whole transcript to Haiku in one request, then
+- `extract/claims.py` sends the whole transcript to Sonnet in one request, then
   normalizes quotes and assigns `c1`, `c2`, ... after sorting the whole result.
 - `extract/youtube.py` waits for that full extraction before verification.
 - `extract/verify.py` uses a `ThreadPoolExecutor` with `CLAIM_WORKERS = 3`.
@@ -57,7 +57,7 @@ not to emit claims from those lines.
   verdicts. Cards appear only after completion.
 - Tests live in `tests/test_verify.py` and `tests/test_claims_quote.py`.
 
-Inspect these again before editing. The Haiku extractor described above is
+Inspect these again before editing. The Sonnet extractor described above is
 already the intended first pass.
 
 ## Desired flow
@@ -65,11 +65,11 @@ already the intended first pass.
 ```text
 Saved timestamped transcript
   -> chronological overlapping chunks
-  -> Haiku extraction for chunk 1
+  -> Sonnet extraction for chunk 1
        -> validate quotes, assign stable IDs, persist claims
        -> show each quote immediately as "checking"
        -> enqueue eligible claims
-  -> Haiku extraction for chunk 2 (while Sonnet handles chunk 1)
+  -> Sonnet extraction for chunk 2 (while research handles chunk 1)
        -> validate, deduplicate, persist, show, enqueue
   -> ...
 
@@ -93,7 +93,7 @@ segments intact where possible. Bound text size too, since caption segments vary
 Keep absolute timestamps. Do not offset or renumber them.
 
 Process chunks one at a time so a Gemini-style quota spike is not replaced by a
-Haiku burst. A complete validated response for one chunk is enough to show its
+extractor burst. A complete validated response for one chunk is enough to show its
 quotes and enqueue them. Do not parse partially streamed JSON. Streaming the
 model response is optional and not required.
 
@@ -141,7 +141,7 @@ Each worker researches a claim, saves that evidence, then assesses it. A separat
 assessor pool is not needed yet. Keep the current Sonnet settings: model
 `claude-sonnet-5-5`, effort `medium`, and the existing search and fetch caps.
 
-The researcher does the judgment Haiku skipped. It reads the exact quote, decides
+The researcher does the judgment the extractor skipped. It reads the exact quote, decides
 what factual assertion that quote makes, and searches for support and
 contradiction. It does not treat an empty `research_question` as a missing claim.
 Assess useful partial evidence and record the limitations. No usable evidence is
@@ -221,11 +221,11 @@ an `insufficient_evidence` verdict. Keep the current visual style.
   chunking rules change. Keep source provenance and citation checks.
 - Record timing and token or tool usage per stage. Do not reset usage on a
   continuation. Report tool counts that were actually observed.
-- Keep the quote separate from interpretation. Do not treat Haiku's claim or
+- Keep the quote separate from interpretation. Do not treat the extractor's claim or
   opinion mark, or the placeholder `unverified` label, as evidence.
 
 Do not bundle unrelated prompt-policy changes, model swaps, or PDF extraction
-into this scheduling work. The Haiku extractor and the Sonnet research handoff
+into this scheduling work. The Sonnet extractor and the Sonnet research handoff
 described above are already the base. Report any other limitation separately.
 
 ## 6. Tests and measurable acceptance criteria
@@ -247,7 +247,7 @@ tests.
 7. Resume reuses matching work, drops stale work when inputs change, and keeps IDs.
 8. Polling and navigation ignore a stale job. Results survive the next poll.
 9. Existing quote, evidence, citation, and standalone CLI tests still pass.
-10. The extractor schema sent to Haiku does not ask for a truth label, confidence,
+10. The extractor schema sent to Sonnet does not ask for a truth label, confidence,
     or research question. Saved claims still contain those fields, filled without
     a model judgment.
 
